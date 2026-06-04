@@ -679,7 +679,7 @@ view_status_and_links() {
     
     # 检测 OpenVPN
     if systemctl is-active --quiet openvpn-vpngate; then
-        echo -e "VPN Gate 运行状态: ${GREEN}已连接 (Active)${PLAIN}"
+        echo -e "VPN Gate 运行状态: ${GREEN}服务已拉起 (Active)${PLAIN}"
         # 显示 VPN 节点出口 IP 归属地信息
         if ip route show table 1000 2>/dev/null | grep -q "default dev"; then
             local vpn_ip=$(curl -s4m5 --interface tun-vpngate icanhazip.com 2>/dev/null)
@@ -688,6 +688,9 @@ view_status_and_links() {
             else
                 echo -e "VPN 节点实际出口 IP: ${YELLOW}已建立隧道，正在配置并等待分配 IP...${PLAIN}"
             fi
+        else
+            echo -e "VPN 隧道状态: ${YELLOW}已拉起进程，但隧道尚未握手连接成功 (策略路由表 1000 仍为空)${PLAIN}"
+            echo -e "${YELLOW}[提示] 这可能是因为选定的 VPN Gate 节点暂时无法连接。若超过 30 秒仍未成功，请执行【选项 8】查看 OpenVPN 日志，或执行【选项 3】切换其他高评分节点。${PLAIN}"
         fi
     else
         echo -e "VPN Gate 运行状态: ${RED}未连接 (Inactive)${PLAIN}"
