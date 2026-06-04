@@ -1,0 +1,823 @@
+#!/usr/bin/env bash
+# -*- coding: utf-8 -*-
+
+# ==============================================================================
+# sb-vpngate 一键配置及管理脚本 (纯 Bash 豪华版，无 Python 依赖)
+# 支持 sing-box 代理入站，及 VPN Gate/直连策略路由出站分流
+# ==============================================================================
+
+# 颜色定义
+RED='\033[31;1m'
+GREEN='\033[32;1m'
+YELLOW='\033[33;1m'
+BLUE='\033[34;1m'
+CYAN='\033[36;1m'
+PLAIN='\033[0m'
+
+# 工作目录与配置文件路径
+SB_DIR="/etc/sing-box"
+ENV_FILE="${SB_DIR}/sb-vpngate.env"
+TEMPLATE_FILE="${SB_DIR}/sb-config.json.template"
+CONFIG_FILE="${SB_DIR}/config.json"
+OPENVPN_DIR="/etc/openvpn"
+VPNGATE_OVPN="${OPENVPN_DIR}/vpngate.ovpn"
+
+# 输出辅助函数
+info() { echo -e "${GREEN}[提示] $1${PLAIN}"; }
+warn() { echo -e "${YELLOW}[警告] $1${PLAIN}"; }
+err() { echo -e "${RED}[错误] $1${PLAIN}"; exit 1; }
+cyan() { echo -e "${CYAN}$1${PLAIN}"; }
+
+# 检查 root 权限
+[[ $EUID -ne 0 ]] && err "请使用 root 权限运行此脚本！(例如: sudo bash $0)"
+
+# 加载保存的环境变量
+if [[ -f "$ENV_FILE" ]]; then
+    source "$ENV_FILE"
+fi
+
+# 检查系统类型
+detect_os() {
+    if [[ -f /etc/redhat-release ]]; then
+        release="centos"
+    elif grep -q -E -i "debian" /etc/os-release; then
+        release="debian"
+    elif grep -q -E -i "ubuntu" /etc/os-release; then
+        release="ubuntu"
+    else
+        err "当前脚本仅支持 Debian, Ubuntu 或 CentOS 系统。"
+    fi
+}
+
+# 检查架构
+detect_arch() {
+    case $(uname -m) in
+        x86_64) cpu="amd64" ;;
+        aarch64) cpu="arm64" ;;
+        armv7l) cpu="armv7" ;;
+        *) err "目前脚本不支持 $(uname -m) CPU 架构。" ;;
+    esac
+}
+
+# 动态生成挂载脚本文件，确保即使独立运行也能成功初始化
+write_routing_scripts() {
+    # 写入 vpngate-up.sh
+    cat > "${OPENVPN_DIR}/vpngate-up.sh" << 'EOF'
+#!/bin/bash
+dev=$1
+local_ip=$4
+echo "[vpngate-up] 接口已启动: ${dev}, 本地分配 IP: ${local_ip}"
+ip route flush table 1000 2>/dev/null
+ip route add default dev "${dev}" table 1000
+if ! ip rule show | grep -q "fwmark 0x3e8"; then
+    ip rule add fwmark 1000 table 1000
+    echo "[vpngate-up] 策略路由规则 fwmark 1000 -> table 1000 添加成功"
+fi
+iptables -t nat -D POSTROUTING -o "${dev}" -j MASQUERADE 2>/dev/null
+iptables -t nat -A POSTROUTING -o "${dev}" -j MASQUERADE
+echo "[vpngate-up] NAT MASQUERADE 规则添加成功"
+exit 0
+EOF
+    chmod +x "${OPENVPN_DIR}/vpngate-up.sh"
+
+    # 写入 vpngate-down.sh
+    cat > "${OPENVPN_DIR}/vpngate-down.sh" << 'EOF'
+#!/bin/bash
+dev=$1
+echo "[vpngate-down] 接口已关闭: ${dev}，开始清理网络规则..."
+iptables -t nat -D POSTROUTING -o "${dev}" -j MASQUERADE 2>/dev/null
+while ip rule show | grep -q "fwmark 0x3e8"; do
+    ip rule del fwmark 1000 table 1000 2>/dev/null
+done
+ip route flush table 1000 2>/dev/null
+echo "[vpngate-down] 规则清理完毕！"
+exit 0
+EOF
+    chmod +x "${OPENVPN_DIR}/vpngate-down.sh"
+}
+
+# 写入配置文件模板
+write_config_template() {
+    cat > "$TEMPLATE_FILE" << 'EOF'
+{
+  "log": {
+    "disabled": false,
+    "level": "info",
+    "timestamp": true
+  },
+  "inbounds": [
+    {
+      "type": "vless",
+      "tag": "vless-in",
+      "listen": "::",
+      "listen_port": PORT_VL_RE,
+      "users": [
+        {
+          "uuid": "UUID_VAL",
+          "flow": "xtls-rprx-vision"
+        }
+      ],
+      "tls": {
+        "enabled": true,
+        "server_name": "YM_VL_RE_VAL",
+        "reality": {
+          "enabled": true,
+          "handshake": {
+            "server": "YM_VL_RE_VAL",
+            "server_port": 443
+          },
+          "private_key": "PRIVATE_KEY_VAL",
+          "short_id": [
+            "SHORT_ID_VAL"
+          ]
+        }
+      }
+    },
+    {
+      "type": "vmess",
+      "tag": "vmess-in",
+      "listen": "::",
+      "listen_port": PORT_VM_WS,
+      "users": [
+        {
+          "uuid": "UUID_VAL",
+          "alterId": 0
+        }
+      ],
+      "transport": {
+        "type": "ws",
+        "path": "PATH_VM_WS_VAL",
+        "max_early_data": 2048,
+        "early_data_header_name": "Sec-WebSocket-Protocol"
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "direct"
+    },
+    {
+      "type": "direct",
+      "tag": "vpngate-out",
+      "routing_mark": 1000
+    },
+    {
+      "type": "block",
+      "tag": "block"
+    }
+  ],
+  "route": {
+    "rules": [
+      {
+        "protocol": [
+          "quic",
+          "stun"
+        ],
+        "outbound": "block"
+      },
+      {
+        "ip_cidr": [
+          "224.0.0.0/3",
+          "ff00::/8",
+          "10.0.0.0/8",
+          "172.16.0.0/12",
+          "192.168.0.0/16",
+          "127.0.0.0/8",
+          "100.64.0.0/10",
+          "::1/128",
+          "fc00::/7",
+          "fe80::/10"
+        ],
+        "outbound": "direct"
+      },
+      {
+        "geosite": [
+          "private"
+        ],
+        "outbound": "direct"
+      },
+      ROUTE_RULES_PLACEHOLDER,
+      {
+        "outbound": "DEFAULT_OUTBOUND_VAL",
+        "network": [
+          "udp",
+          "tcp"
+        ]
+      }
+    ],
+    "final": "direct",
+    "auto_detect_interface": true
+  }
+}
+EOF
+}
+
+# 安装必要依赖
+install_dependencies() {
+    info "开始安装基础系统依赖..."
+    detect_os
+    
+    if [[ "$release" == "debian" || "$release" == "ubuntu" ]]; then
+        apt-get update -y
+        apt-get install -y curl openvpn python3 iptables jq tar wget openssl
+    elif [[ "$release" == "centos" ]]; then
+        yum install -y epel-release
+        yum makecache
+        yum install -y curl openvpn python3 iptables jq tar wget openssl
+    fi
+    
+    # 确保文件夹存在
+    mkdir -p "$SB_DIR"
+    mkdir -p "$OPENVPN_DIR"
+    
+    # 写入挂载脚本与模板
+    write_routing_scripts
+    write_config_template
+    
+    info "依赖软件和核心辅助脚本安装完成。"
+}
+
+# 获取最新 sing-box 版本
+get_latest_sing_box_version() {
+    local version=""
+    version=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | grep -oP '"tag_name":\s*"v\K[0-9.]+' | head -n 1)
+    if [[ -z "$version" ]]; then
+        version=$(curl -Ls -o /dev/null -w %{url_effective} https://github.com/SagerNet/sing-box/releases/latest | grep -oP 'tag/v\K[0-9.]+' | head -n 1)
+    fi
+    if [[ -z "$version" ]]; then
+        version="1.11.2"  # 兜底默认版本
+    fi
+    echo "$version"
+}
+
+# 安装或升级 sing-box
+install_sing_box() {
+    detect_arch
+    local version=$(get_latest_sing_box_version)
+    info "正从 GitHub 下载 sing-box v${version} (${cpu})..."
+    
+    local filename="sing-box-${version}-linux-${cpu}"
+    local download_url="https://github.com/SagerNet/sing-box/releases/download/v${version}/${filename}.tar.gz"
+    
+    wget -qO /tmp/sing-box.tar.gz "$download_url"
+    if [[ $? -ne 0 ]]; then
+        err "下载 sing-box 核心失败，请检查网络是否能顺畅访问 GitHub。"
+    fi
+    
+    tar -zxf /tmp/sing-box.tar.gz -C /tmp/
+    mv "/tmp/${filename}/sing-box" "/usr/local/bin/sing-box"
+    chmod +x "/usr/local/bin/sing-box"
+    rm -rf /tmp/sing-box* "/tmp/${filename}"
+    
+    info "sing-box 内核已成功安装至 /usr/local/bin/sing-box"
+    /usr/local/bin/sing-box version
+    
+    # 写入 systemd 配置文件
+    cat > /etc/systemd/system/sing-box.service <<EOF
+[Unit]
+Description=sing-box service
+After=network.target nss-lookup.target
+
+[Service]
+User=root
+WorkingDirectory=/root
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
+ExecStart=/usr/local/bin/sing-box run -c /etc/sing-box/config.json
+ExecReload=/bin/kill -HUP \$MAINPID
+Restart=on-failure
+RestartSec=10
+LimitNOFILE=infinity
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable sing-box >/dev/null 2>&1
+    info "sing-box systemd 服务已注册并启用。"
+}
+
+# 随机生成未占用的端口
+get_random_port() {
+    local port
+    while true; do
+        port=$(shuf -i 10000-65535 -n 1)
+        if ! ss -tuln | grep -q -w "$port"; then
+            echo "$port"
+            break
+        fi
+    done
+}
+
+# 配置入站环境参数
+configure_inbounds() {
+    info "开始配置 sing-box 入站参数..."
+    
+    read -p "设置 VLESS-Reality 监听端口 [默认随机]: " input_port_vl
+    if [[ -z "$input_port_vl" ]]; then
+        if [[ -n "$PORT_VL_RE" ]]; then port_vl_re="$PORT_VL_RE"; else port_vl_re=$(get_random_port); fi
+    else
+        port_vl_re="$input_port_vl"
+    fi
+    
+    read -p "设置 VMess-WS 监听端口 [默认随机]: " input_port_vm
+    if [[ -z "$input_port_vm" ]]; then
+        if [[ -n "$PORT_VM_WS" ]]; then port_vm_ws="$PORT_VM_WS"; else port_vm_ws=$(get_random_port); fi
+    else
+        port_vm_ws="$input_port_vm"
+    fi
+    
+    read -p "设置 VLESS-Reality 伪装 SNI 域名 [默认: apple.com]: " input_sni
+    if [[ -z "$input_sni" ]]; then
+        if [[ -n "$YM_VL_RE" ]]; then ym_vl_re="$YM_VL_RE"; else ym_vl_re="apple.com"; fi
+    else
+        ym_vl_re="$input_sni"
+    fi
+    
+    # 生成 UUID
+    if [[ -n "$UUID" ]]; then
+        uuid_val="$UUID"
+    else
+        uuid_val=$(/usr/local/bin/sing-box generate uuid 2>/dev/null || cat /proc/sys/kernel/random/uuid)
+    fi
+    
+    # 生成 Reality 密钥对
+    if [[ -n "$PRIVATE_KEY" && -n "$PUBLIC_KEY" ]]; then
+        priv_key="$PRIVATE_KEY"
+        pub_key="$PUBLIC_KEY"
+    else
+        local keypair=$(/usr/local/bin/sing-box generate reality-keypair 2>/dev/null)
+        priv_key=$(echo "$keypair" | grep -i "PrivateKey" | awk '{print $2}')
+        pub_key=$(echo "$keypair" | grep -i "PublicKey" | awk '{print $2}')
+    fi
+    
+    # 生成 ShortID
+    if [[ -n "$SHORT_ID" ]]; then
+        short_id_val="$SHORT_ID"
+    else
+        short_id_val=$(openssl rand -hex 8)
+    fi
+    
+    # 设置 VMess 路径
+    if [[ -n "$PATH_VM_WS" ]]; then
+        path_vm_ws_val="$PATH_VM_WS"
+    else
+        path_vm_ws_val="/${uuid_val}-vm"
+    fi
+    
+    # 保存环境参数到持久化文件
+    cat > "$ENV_FILE" <<EOF
+PORT_VL_RE=${port_vl_re}
+PORT_VM_WS=${port_vm_ws}
+UUID="${uuid_val}"
+YM_VL_RE="${ym_vl_re}"
+PRIVATE_KEY="${priv_key}"
+PUBLIC_KEY="${pub_key}"
+SHORT_ID="${short_id_val}"
+PATH_VM_WS="${path_vm_ws_val}"
+ROUTING_MODE=${ROUTING_MODE:-1}
+EOF
+
+    # 更新全局配置变量
+    PORT_VL_RE=${port_vl_re}
+    PORT_VM_WS=${port_vm_ws}
+    UUID="${uuid_val}"
+    YM_VL_RE="${ym_vl_re}"
+    PRIVATE_KEY="${priv_key}"
+    PUBLIC_KEY="${pub_key}"
+    SHORT_ID="${short_id_val}"
+    PATH_VM_WS="${path_vm_ws_val}"
+    
+    info "入站配置参数已成功生成并保存。"
+}
+
+# 纯 Bash 生成并校验 config.json
+generate_config_json() {
+    if [[ ! -f "$TEMPLATE_FILE" ]]; then
+        # 如果模板缺失，重新写入模板
+        write_config_template
+    fi
+    
+    # 复制模板到临时配置文件
+    cp "$TEMPLATE_FILE" "$CONFIG_FILE"
+    
+    # 确定默认出站和分流路由规则
+    local default_outbound
+    local rules_json
+    if [[ "${ROUTING_MODE:-1}" -eq 1 ]]; then
+        # 全局代理模式：中国流量直连，其余出站走 VPN Gate
+        default_outbound="vpngate-out"
+        rules_json='{"geosite": ["cn"], "outbound": "direct"}, {"geoip": ["cn"], "outbound": "direct"}'
+    else
+        # 规则分流模式：默认直连，境外常用服务走 VPN Gate
+        default_outbound="direct"
+        rules_json='{"geosite": ["geolocation-!cn", "netflix", "disney", "google", "telegram"], "outbound": "vpngate-out"}, {"geoip": ["telegram"], "outbound": "vpngate-out"}'
+    fi
+    
+    # 使用自定义定界符 '#' 执行 sed 替换，保证 Base64 中的 '/' 字符不引发 sed 语法报错
+    sed -i "s#PORT_VL_RE#${PORT_VL_RE}#g" "$CONFIG_FILE"
+    sed -i "s#PORT_VM_WS#${PORT_VM_WS}#g" "$CONFIG_FILE"
+    sed -i "s#UUID_VAL#${UUID}#g" "$CONFIG_FILE"
+    sed -i "s#YM_VL_RE_VAL#${YM_VL_RE}#g" "$CONFIG_FILE"
+    sed -i "s#PRIVATE_KEY_VAL#${PRIVATE_KEY}#g" "$CONFIG_FILE"
+    sed -i "s#SHORT_ID_VAL#${SHORT_ID}#g" "$CONFIG_FILE"
+    sed -i "s#PATH_VM_WS_VAL#${PATH_VM_WS}#g" "$CONFIG_FILE"
+    sed -i "s#DEFAULT_OUTBOUND_VAL#${default_outbound}#g" "$CONFIG_FILE"
+    sed -i "s#ROUTE_RULES_PLACEHOLDER#${rules_json}#g" "$CONFIG_FILE"
+    
+    # 使用 jq 校验 JSON 格式
+    if jq . "$CONFIG_FILE" >/dev/null 2>&1; then
+        info "config.json 已成功生成且通过语法合法性校验。"
+    else
+        err "生成的 config.json 存在语法错误，请检查配置文件模板！"
+    fi
+}
+
+# 纯 Bash 交互式更新并连接 VPN Gate 节点
+connect_vpngate() {
+    info "正在拉取 VPN Gate 可用节点列表..."
+    
+    # 抓取 CSV 节点原始数据并清洗，去掉开头的注释行与尾部的星号行
+    curl -sL --connect-timeout 12 "https://www.vpngate.net/api/iphone/" | grep -v '^#' | grep -v '^\*' | grep -v '^$' > /tmp/vg_raw.csv
+    if [[ ! -s /tmp/vg_raw.csv ]]; then
+        # 备用地址
+        curl -sL --connect-timeout 12 "http://mirror.vpngate.net/api/iphone/" | grep -v '^#' | grep -v '^\*' | grep -v '^$' > /tmp/vg_raw.csv
+    fi
+    
+    if [[ ! -s /tmp/vg_raw.csv ]]; then
+        warn "拉取 VPN Gate 列表失败，请检查 VPS 的网络能否访问外网。"
+        return
+    fi
+    
+    # 提供国家/地区过滤筛选
+    local country_filter
+    read -p "过滤指定国家节点 (例如: JP, US, KR，直接回车显示所有评分最高节点): " country_filter
+    country_filter=$(echo "$country_filter" | tr '[:lower:]' '[:upper:]')
+    
+    # 纯 Bash / awk 提取核心属性，并按评分 (Score) 进行倒序排序
+    # 列关系：$2-IP, $3-Score, $4-Ping, $5-Speed, $7-CountryShort, $NF-Base64配置
+    if [[ -n "$country_filter" ]]; then
+        awk -F',' -v country="$country_filter" '$7 == country {print $2 "|" $3 "|" $4 "|" $5 "|" $7 "|" $NF}' /tmp/vg_raw.csv | sort -t'|' -k2,2rn > /tmp/vg_sorted.txt
+    else
+        awk -F',' '{print $2 "|" $3 "|" $4 "|" $5 "|" $7 "|" $NF}' /tmp/vg_raw.csv | sort -t'|' -k2,2rn > /tmp/vg_sorted.txt
+    fi
+    
+    if [[ ! -s /tmp/vg_sorted.txt ]]; then
+        warn "未找到匹配国家 [$country_filter] 的节点，展示所有节点列表。"
+        awk -F',' '{print $2 "|" $3 "|" $4 "|" $5 "|" $7 "|" $NF}' /tmp/vg_raw.csv | sort -t'|' -k2,2rn > /tmp/vg_sorted.txt
+    fi
+    
+    # 截取前 15 个节点展示
+    head -n 15 /tmp/vg_sorted.txt > /tmp/vg_top15.txt
+    
+    # 打印排版漂亮的表格
+    echo -e "\n------------------------------------------------------------------------------------"
+    printf "%-5s | %-10s | %-15s | %-10s | %-12s | %-10s\n" "序号" "国家" "IP 地址" "延迟Ping" "最大带宽" "系统评分"
+    echo "------------------------------------------------------------------------------------"
+    
+    local i=1
+    declare -A node_ip
+    declare -A node_country
+    declare -A node_b64
+    
+    while IFS='|' read -r ip score ping speed country b64; do
+        # 格式化宽带速率显示
+        local speed_val="Unknown"
+        if [[ "$speed" -gt 0 ]]; then
+            # 计算 Mbps 并保留一位小数
+            local mbps=$(awk -v s="$speed" 'BEGIN {printf "%.1f", s/1000000}')
+            speed_val="${mbps} Mbps"
+        fi
+        
+        local ping_val="${ping} ms"
+        if [[ "$ping" -le 0 ]]; then ping_val="Unknown"; fi
+        
+        printf "\033[36m%-5s\033[0m | %-10s | %-15s | %-10s | %-12s | %-10s\n" "$i" "$country" "$ip" "$ping_val" "$speed_val" "$score"
+        
+        # 将数据缓存到数组中供用户选择
+        node_ip[$i]="$ip"
+        node_country[$i]="$country"
+        node_b64[$i]="$b64"
+        
+        i=$((i+1))
+    done < /tmp/vg_top15.txt
+    echo "------------------------------------------------------------------------------------"
+    local total_nodes=$((i-1))
+    
+    if [[ "$total_nodes" -eq 0 ]]; then
+        warn "无可用的 VPN 节点。"
+        return
+    fi
+    
+    # 引导用户选择
+    local choice
+    while true; do
+        read -p "请选择要连接的节点序号【1-${total_nodes}】(输入 q 退出): " choice
+        if [[ "$choice" == "q" || "$choice" == "Q" ]]; then
+            info "操作取消。"
+            return
+        fi
+        if [[ "$choice" -ge 1 && "$choice" -le "$total_nodes" ]]; then
+            local selected_ip="${node_ip[$choice]}"
+            local selected_country="${node_country[$choice]}"
+            local selected_b64="${node_b64[$choice]}"
+            break
+        else
+            warn "请输入有效的数字序号。"
+        fi
+    done
+    
+    # 解码 base64
+    echo -n "$selected_b64" | base64 -d > /tmp/vg_decoded.ovpn 2>/dev/null
+    if [[ ! -s /tmp/vg_decoded.ovpn ]]; then
+        # 备用解码方式
+        echo -n "$selected_b64" | openssl base64 -d > /tmp/vg_decoded.ovpn 2>/dev/null
+    fi
+    
+    if [[ ! -s /tmp/vg_decoded.ovpn ]]; then
+        err "VPN 节点 Base64 配置文件解码失败！"
+    fi
+    
+    # 动态改写 OpenVPN 配置参数，清洗掉原有的默认网关替换，并绑定自定义网卡与 up/down 路由策略
+    grep -v -E '^(dev |redirect-gateway|route-gateway|dhcp-option DNS)' /tmp/vg_decoded.ovpn > "$VPNGATE_OVPN"
+    
+    cat >> "$VPNGATE_OVPN" <<EOF
+
+# 以下由 sb-vpngate 脚本自动注入，用于配置策略路由分流
+dev tun-vpngate
+route-nopull
+script-security 2
+up /etc/openvpn/vpngate-up.sh
+down /etc/openvpn/vpngate-down.sh
+EOF
+
+    info "选定节点 IP: ${selected_ip} (${selected_country})，配置写入成功。"
+    
+    # 重新生成守护服务
+    local openvpn_path=$(which openvpn)
+    [[ -z "$openvpn_path" ]] && openvpn_path="/usr/sbin/openvpn"
+    
+    cat > /etc/systemd/system/openvpn-vpngate.service <<EOF
+[Unit]
+Description=VPN Gate OpenVPN Client Connection
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=${openvpn_path} --config ${VPNGATE_OVPN}
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    systemctl restart openvpn-vpngate
+    info "已重新启动 openvpn-vpngate 客户端以应用新建立的 VPN 节点。"
+    sleep 3
+    
+    if systemctl is-active --quiet openvpn-vpngate; then
+        info "OpenVPN 服务正尝试连接建立隧道，分配 IP 可能需要 5-15 秒左右..."
+    else
+        warn "OpenVPN 服务拉起失败，请运行 systemctl status openvpn-vpngate 检查服务报错。"
+    fi
+}
+
+# 设置分流路由模式
+configure_routing_mode() {
+    echo -e "\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
+    cyan "请选择出站分流路由模式："
+    echo "1. 【全局代理模式】 (默认除 CN 中国大陆流量直连，其余所有出站全部走 VPN Gate)"
+    echo "2. 【规则分流模式】 (默认直连，仅境外主流服务如 Google/Netflix/Telegram 走 VPN Gate)"
+    read -p "请输入模式【1-2】[当前:${ROUTING_MODE:-1}]: " choice_mode
+    
+    case "$choice_mode" in
+        1) ROUTING_MODE=1 ;;
+        2) ROUTING_MODE=2 ;;
+        *) warn "输入错误或保持默认，未修改路由模式。" ;;
+    esac
+    
+    # 写入环境变量并重新生成配置
+    sed -i "s/ROUTING_MODE=.*/ROUTING_MODE=${ROUTING_MODE}/" "$ENV_FILE" 2>/dev/null || echo "ROUTING_MODE=${ROUTING_MODE}" >> "$ENV_FILE"
+    
+    if [[ -n "$UUID" ]]; then
+        generate_config_json
+        systemctl restart sing-box
+        info "sing-box 路由配置已更新并重启应用。"
+    fi
+}
+
+# 启动服务
+start_services() {
+    info "正在启动所有服务..."
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        err "未找到 sing-box 配置文件 config.json，请先执行选项 2 配置入站。"
+    fi
+    
+    systemctl restart sing-box
+    info "sing-box 服务已启动/重启。"
+    
+    if [[ -f "$VPNGATE_OVPN" ]]; then
+        systemctl restart openvpn-vpngate
+        info "openvpn-vpngate 客户端已启动/重启。"
+    else
+        warn "未检测到已下载的 VPN Gate 节点配置，请执行选项 3 关联并启动 VPN Gate。"
+    fi
+}
+
+# 停止服务
+stop_services() {
+    info "正在停止相关服务..."
+    systemctl stop sing-box 2>/dev/null
+    systemctl stop openvpn-vpngate 2>/dev/null
+    
+    # 额外通过 vpngate-down.sh 清理策略路由和网卡规则，以防遗留
+    if [[ -x "${OPENVPN_DIR}/vpngate-down.sh" ]]; then
+        "${OPENVPN_DIR}/vpngate-down.sh" tun-vpngate 2>/dev/null
+    fi
+    
+    info "所有相关服务均已停止，策略路由规则已重置。"
+}
+
+# 获取 VPS 外部公网 IP
+get_public_ip() {
+    local ip=""
+    ip=$(curl -s4m5 icanhazip.com || curl -s4m5 api.ipify.org)
+    if [[ -z "$ip" ]]; then
+        ip="你的VPS公网IP"
+    fi
+    echo "$ip"
+}
+
+# 查看运行状态与客户端链接
+view_status_and_links() {
+    local vps_ip=$(get_public_ip)
+    
+    echo -e "\n======================= 系统运行状态 ======================="
+    # 检测 sing-box
+    if systemctl is-active --quiet sing-box; then
+        echo -e "sing-box 运行状态: ${GREEN}运行中 (Active)${PLAIN}"
+    else
+        echo -e "sing-box 运行状态: ${RED}已停止 (Inactive)${PLAIN}"
+    fi
+    
+    # 检测 OpenVPN
+    if systemctl is-active --quiet openvpn-vpngate; then
+        echo -e "VPN Gate 运行状态: ${GREEN}已连接 (Active)${PLAIN}"
+        # 显示 VPN 节点出口 IP 归属地信息
+        if ip route show table 1000 | grep -q "default dev"; then
+            local vpn_ip=$(curl -s4m5 --interface tun-vpngate icanhazip.com 2>/dev/null)
+            if [[ -n "$vpn_ip" ]]; then
+                echo -e "VPN 节点实际出口 IP: ${CYAN}${vpn_ip}${PLAIN}"
+            else
+                echo -e "VPN 节点实际出口 IP: ${YELLOW}已建立隧道，正在握手分配 IP...${PLAIN}"
+            fi
+        fi
+    else
+        echo -e "VPN Gate 运行状态: ${RED}未连接 (Inactive)${PLAIN}"
+    fi
+    
+    # 显示当前的策略模式
+    if [[ "$ROUTING_MODE" -eq 2 ]]; then
+        echo -e "分流出站路由模式: ${CYAN}规则分流模式 (境外常用走 VPN，其余直连)${PLAIN}"
+    else
+        echo -e "分流出站路由模式: ${CYAN}全局代理模式 (除中国流量直连，其余全部走 VPN)${PLAIN}"
+    fi
+    
+    if [[ -z "$UUID" ]]; then
+        warn "尚未生成任何节点入站配置，请先执行选项 2 进行配置生成。"
+        return
+    fi
+    
+    echo -e "\n======================= 协议入站端口 ======================="
+    echo -e "VLESS-Reality 端口: ${CYAN}${PORT_VL_RE}${PLAIN}"
+    echo -e "VMess-WS 端口:      ${CYAN}${PORT_VM_WS}${PLAIN}"
+    echo -e "通用 UUID 密码:     ${CYAN}${UUID}${PLAIN}"
+    
+    echo -e "\n======================= 客户端连接节点 (直连导入) ======================="
+    
+    # VLESS Reality 链接
+    local vless_link="vless://${UUID}@${vps_ip}:${PORT_VL_RE}?security=reality&sni=${YM_VL_RE}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&flow=xtls-rprx-vision#sb-vpngate_VLESS"
+    echo -e "\033[35;1mVLESS-Reality 链接:\033[0m"
+    echo "$vless_link"
+    
+    # VMess WS 链接 (Base64)
+    local vmess_json="{\"v\":\"2\",\"ps\":\"sb-vpngate_VMess-WS\",\"add\":\"${vps_ip}\",\"port\":${PORT_VM_WS},\"id\":\"${UUID}\",\"aid\":\"0\",\"scy\":\"auto\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${vps_ip}\",\"path\":\"${PATH_VM_WS}\",\"tls\":\"none\"}"
+    local vmess_b64=$(echo -n "$vmess_json" | base64 -w 0)
+    local vmess_link="vmess://${vmess_b64}"
+    echo -e "\n\033[35;1mVMess-WS 链接:\033[0m"
+    echo "$vmess_link"
+    
+    echo -e "\n============================================================\n"
+}
+
+# 彻底卸载脚本与服务
+uninstall_all() {
+    echo -e "\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
+    warn "您确认要卸载本脚本的所有组件吗？这将删除所有配置、停止并删除服务！"
+    read -p "请输入 [y/N] 进行确认: " confirm
+    if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+        info "已取消卸载。"
+        return
+    fi
+    
+    stop_services
+    
+    # 删除 systemd 服务
+    systemctl disable sing-box >/dev/null 2>&1
+    systemctl disable openvpn-vpngate >/dev/null 2>&1
+    rm -f /etc/systemd/system/sing-box.service
+    rm -f /etc/systemd/system/openvpn-vpngate.service
+    systemctl daemon-reload
+    
+    # 删除二进制核心与配置目录
+    rm -f /usr/local/bin/sing-box
+    rm -rf "$SB_DIR"
+    
+    # 清理 OpenVPN 配置
+    rm -f "$VPNGATE_OVPN"
+    rm -f "${OPENVPN_DIR}/vpngate-up.sh" "${OPENVPN_DIR}/vpngate-down.sh"
+    
+    info "卸载完成！所有组件、配置及服务均已清理完毕。"
+    exit 0
+}
+
+# 主循环控制菜单
+main_menu() {
+    if [[ -f "$ENV_FILE" ]]; then
+        source "$ENV_FILE"
+    fi
+    
+    echo -e "\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
+    cyan "           sing-box 入站 / VPN Gate 策略分流出站 一键脚本 (纯 Bash 版)"
+    echo " 1. 安装/更新 Sing-box & OpenVPN 依赖"
+    echo " 2. 配置并生成 Sing-box 入站配置 (VLESS-Reality / VMess-WS)"
+    echo " 3. 选择并连接 VPN Gate 节点 (交互式更新)"
+    echo " 4. 修改策略出站分流模式 (全局/规则分流)"
+    echo " 5. 启动服务 (sing-box & openvpn-vpngate)"
+    echo " 6. 停止服务"
+    echo " 7. 查看当前运行状态与配置连接信息"
+    echo " 8. 彻底卸载本脚本服务"
+    echo " 0. 退出脚本"
+    echo "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
+    read -p "请输入数字选择选项【0-8】: " menu_choice
+    
+    case "$menu_choice" in
+        1)
+            install_dependencies
+            install_sing_box
+            ;;
+        2)
+            configure_inbounds
+            generate_config_json
+            ;;
+        3)
+            connect_vpngate
+            ;;
+        4)
+            configure_routing_mode
+            ;;
+        5)
+            start_services
+            ;;
+        6)
+            stop_services
+            ;;
+        7)
+            view_status_and_links
+            ;;
+        8)
+            uninstall_all
+            ;;
+        0)
+            cyan "感谢使用本脚本，退出。"
+            exit 0
+            ;;
+        *)
+            warn "无效的输入选项，请输入数字 0 至 8。"
+            ;;
+    esac
+}
+
+# 脚本入口
+main() {
+    # 打印 ASCII 艺术字
+    echo -e "${CYAN}"
+    echo "   ____  ____    _   _ ____  _   _  ____    _  _____ _____ "
+    echo "  / ___|| __ )  | | | |  _ \| \ | |/ ___|  / \|_   _| ____|"
+    echo "  \___ \|  _ \  | | | | |_) |  \| | |  _  / _ \ | | |  _|  "
+    echo "   ___) | |_) | | |_| |  __/| |\  | |_| |/ ___ \| | | |___ "
+    echo "  |____/|____/   \___/|_|   |_| \_|\____/_/   \_\_| |_____|"
+    echo -e "${PLAIN}"
+    
+    detect_os
+    
+    while true; do
+        main_menu
+    done
+}
+
+main "$@"
