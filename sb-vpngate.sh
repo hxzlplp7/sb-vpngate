@@ -982,8 +982,10 @@ local success=0
                 break
             fi
             
-            # 使用本地监听端口进行出站探测
-            if curl -s4m4 -x http://127.0.0.1:10080 icanhazip.com >/dev/null 2>&1; then
+            # 探测是否能够通过代理访问外网（严格进行合法 IP 正则匹配）
+            local probe_ip
+            probe_ip=$(curl -s4m4 -x http://127.0.0.1:10080 icanhazip.com 2>/dev/null | tr -d '\r\n ')
+            if [[ "$probe_ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
                 connected=1
                 break
             fi
@@ -1242,8 +1244,10 @@ while true; do
         # 只有在存在选定节点时才进行自愈探测，以防初始未配置而死循环
         if [[ -f "/etc/sing-box/selected_node.json" ]]; then
             local test_ok=0
-            # 通过本地 sing-box http 探测接口测试
-            if curl -s4m4 -x http://127.0.0.1:10080 icanhazip.com >/dev/null 2>&1; then
+            # 检测 sing-box http 代理端口（严格进行合法 IP 正则匹配）
+            local probe_ip
+            probe_ip=\$(curl -s4m4 -x http://127.0.0.1:10080 icanhazip.com 2>/dev/null | tr -d '\\r\\n ')
+            if [[ "\$probe_ip" =~ ^[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}\$ ]]; then
                 test_ok=1
             fi
             
