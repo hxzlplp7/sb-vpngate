@@ -451,6 +451,11 @@ connect_vpngate() {
         return
     fi
     
+    # 提取当前可用国家的简称及各自的节点数量，按节点数降序排列
+    local countries_summary
+    countries_summary=$(awk -F',' '{print $7}' /tmp/vg_raw.csv | sort | uniq -c | sort -rn | awk '{printf "%s(%s) ", $2, $1}' | sed 's/ $//')
+    echo -e "当前可用国家及节点数统计: \033[36m${countries_summary}\033[0m"
+
     # 提供国家/地区过滤筛选
     local country_filter
     read -p "过滤指定国家节点 (例如: JP, US, KR，直接回车显示所有评分最高节点): " country_filter
