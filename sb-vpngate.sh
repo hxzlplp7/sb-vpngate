@@ -62,7 +62,7 @@ detect_arch() {
 # 动态生成挂载脚本文件，确保即使独立运行也能成功初始化
 write_routing_scripts() {
     # 写入 vpngate-up.sh
-    cat > "${OPENVPN_DIR}/vpngate-up.sh" << 'EOF'
+    cat << 'EOF' | tr -d '\r' > "${OPENVPN_DIR}/vpngate-up.sh"
 #!/bin/bash
 dev=$1
 local_ip=$4
@@ -81,7 +81,7 @@ EOF
     chmod +x "${OPENVPN_DIR}/vpngate-up.sh"
 
     # 写入 vpngate-down.sh
-    cat > "${OPENVPN_DIR}/vpngate-down.sh" << 'EOF'
+    cat << 'EOF' | tr -d '\r' > "${OPENVPN_DIR}/vpngate-down.sh"
 #!/bin/bash
 dev=$1
 echo "[vpngate-down] 接口已关闭: ${dev}，开始清理网络规则..."
@@ -96,7 +96,7 @@ EOF
     chmod +x "${OPENVPN_DIR}/vpngate-down.sh"
 
     # 写入 vpngate.auth 默认账号密码文件 (vpn / vpn)
-    cat > "${OPENVPN_DIR}/vpngate.auth" << 'EOF'
+    cat << 'EOF' | tr -d '\r' > "${OPENVPN_DIR}/vpngate.auth"
 vpn
 vpn
 EOF
@@ -105,7 +105,7 @@ EOF
 
 # 写入配置文件模板
 write_config_template() {
-    cat > "$TEMPLATE_FILE" << 'EOF'
+    cat << 'EOF' | tr -d '\r' > "$TEMPLATE_FILE"
 {
   "log": {
     "disabled": false,
@@ -278,7 +278,7 @@ install_sing_box() {
     /usr/local/bin/sing-box version
     
     # 写入 systemd 配置文件
-    cat > /etc/systemd/system/sing-box.service <<EOF
+    cat <<EOF | tr -d '\r' > /etc/systemd/system/sing-box.service
 [Unit]
 Description=sing-box service
 After=network.target nss-lookup.target
@@ -378,7 +378,7 @@ configure_inbounds() {
     fi
     
     # 保存环境参数到持久化文件
-    cat > "$ENV_FILE" <<EOF
+    cat <<EOF | tr -d '\r' > "$ENV_FILE"
 PORT_VL_RE=${port_vl_re}
 PORT_VM_WS=${port_vm_ws}
 UUID="${uuid_val}"
@@ -631,10 +631,10 @@ connect_vpngate() {
         err "VPN 节点 Base64 配置文件解码失败！"
     fi
     
-    # 动态改写 OpenVPN 配置参数，清洗掉任何带前导空格的默认网关、路由指令以及旧的认证选项（忽略大小写，保留 route-nopull）
-    grep -v -i -E '^[[:space:]]*(dev|redirect-gateway|route-gateway|route[[:space:]]+[0-9]|dhcp-option|auth-user-pass)' /tmp/vg_decoded.ovpn > "$VPNGATE_OVPN"
+    # 动态改写 OpenVPN 配置参数，清洗掉任何带前导空格的默认网关、路由指令以及旧的认证选项（忽略大小写，保留 route-nopull），同时过滤掉 \r 换行符
+    grep -v -i -E '^[[:space:]]*(dev|redirect-gateway|route-gateway|route[[:space:]]+[0-9]|dhcp-option|auth-user-pass)' /tmp/vg_decoded.ovpn | tr -d '\r' > "$VPNGATE_OVPN"
     
-    cat >> "$VPNGATE_OVPN" <<EOF
+    cat <<EOF | tr -d '\r' >> "$VPNGATE_OVPN"
 
 # 以下由 sb-vpngate 脚本自动注入，用于配置认证与策略路由分流
 auth-user-pass /etc/openvpn/vpngate.auth
@@ -651,7 +651,7 @@ EOF
     local openvpn_path=$(which openvpn)
     [[ -z "$openvpn_path" ]] && openvpn_path="/usr/sbin/openvpn"
     
-    cat > /etc/systemd/system/openvpn-vpngate.service <<EOF
+    cat <<EOF | tr -d '\r' > /etc/systemd/system/openvpn-vpngate.service
 [Unit]
 Description=VPN Gate OpenVPN Client Connection
 After=network.target
