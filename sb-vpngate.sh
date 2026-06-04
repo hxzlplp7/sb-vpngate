@@ -440,6 +440,45 @@ generate_config_json() {
     fi
 }
 
+# 测试单个 VPN 节点的连通性 (TCP/Ping 结合)
+test_node_connectivity() {
+    local b64="$1"
+    local ip="$2"
+    
+    # 解码
+    local ovpn=$(echo -n "$b64" | base64 -d 2>/dev/null)
+    [[ -z "$ovpn" ]] && ovpn=$(echo -n "$b64" | openssl base64 -d 2>/dev/null)
+    
+    if [[ -z "$ovpn" ]]; then
+        echo -e "${RED}解码失败${PLAIN}"
+        return 1
+    fi
+    
+    # 提取 remote 行及协议
+    local remote_line=$(echo "$ovpn" | grep -E '^remote[[:space:]]' | head -n 1)
+    local proto=$(echo "$ovpn" | grep -E '^proto[[:space:]]' | head -n 1 | awk '{print $2}' | tr '[:upper:]' '[:lower:]')
+    local port=$(echo "$remote_line" | awk '{print $3}')
+    
+    [[ -z "$port" ]] && port="443"
+    
+    # 优先测试 TCP 端口连通性 (使用 Bash 内置 Socket 提升速度与准确度)
+    if [[ "$remote_line" == *tcp* || "$proto" == *tcp* ]]; then
+        if timeout 1.2 bash -c "</dev/tcp/${ip}/${port}" >/dev/null 2>&1; then
+            echo -e "${GREEN}可用 (TCP)${PLAIN}"
+            return 0
+        fi
+    fi
+    
+    # 备用使用 Ping 测试
+    if ping -c 1 -W 1 "$ip" >/dev/null 2>&1; then
+        echo -e "${GREEN}可用 (Ping)${PLAIN}"
+        return 0
+    fi
+    
+    echo -e "${RED}不可用${PLAIN}"
+    return 1
+}
+
 # 纯 Bash 交互式更新并连接 VPN Gate 节点
 connect_vpngate() {
     info "正在拉取 VPN Gate 可用节点列表..."
@@ -467,7 +506,6 @@ connect_vpngate() {
     country_filter=$(echo "$country_filter" | tr '[:lower:]' '[:upper:]')
     
     # 纯 Bash / awk 提取核心属性，并按评分 (Score) 进行倒序排序
-    # 列关系：$2-IP, $3-Score, $4-Ping, $5-Speed, $7-CountryShort, $NF-Base64配置
     if [[ -n "$country_filter" ]]; then
         awk -F',' -v country="$country_filter" '$7 == country {print $2 "|" $3 "|" $4 "|" $5 "|" $7 "|" $NF}' /tmp/vg_raw.csv | sort -t'|' -k2,2rn > /tmp/vg_sorted.txt
     else
@@ -482,21 +520,63 @@ connect_vpngate() {
     # 截取前 15 个节点展示
     head -n 15 /tmp/vg_sorted.txt > /tmp/vg_top15.txt
     
-    # 打印排版漂亮的表格
-    echo -e "\n------------------------------------------------------------------------------------"
-    printf "%-5s | %-10s | %-15s | %-10s | %-12s | %-10s\n" "序号" "国家" "IP 地址" "延迟Ping" "最大带宽" "系统评分"
-    echo "------------------------------------------------------------------------------------"
-    
     local i=1
     declare -A node_ip
     declare -A node_country
     declare -A node_b64
+    declare -A node_score
+    declare -A node_ping
+    declare -A node_speed
     
+    # 解析并缓存原始节点细节
     while IFS='|' read -r ip score ping speed country b64; do
+        node_ip[$i]="$ip"
+        node_score[$i]="$score"
+        node_ping[$i]="$ping"
+        node_speed[$i]="$speed"
+        node_country[$i]="$country"
+        node_b64[$i]="$b64"
+        i=$((i+1))
+    done < /tmp/vg_top15.txt
+    local total_nodes=$((i-1))
+    
+    if [[ "$total_nodes" -eq 0 ]]; then
+        warn "无可用的 VPN 节点。"
+        return
+    fi
+    
+    # 多进程并行执行连通性网络测试，提升显示响应速度
+    info "正在对前 ${total_nodes} 个节点进行并发连通性测试 (网络握手/Ping)..."
+    declare -A test_pids
+    for j in $(seq 1 $total_nodes); do
+        (
+            local res
+            res=$(test_node_connectivity "${node_b64[$j]}" "${node_ip[$j]}")
+            echo "$res" > "/tmp/vg_res_${j}.txt"
+        ) &
+        test_pids[$j]=$!
+    done
+    
+    # 等待所有后台网络检测子任务运行完毕
+    for j in $(seq 1 $total_nodes); do
+        wait ${test_pids[$j]} 2>/dev/null
+    done
+    
+    # 打印排版漂亮的表格
+    echo -e "\n------------------------------------------------------------------------------------------------"
+    printf "%-5s | %-10s | %-15s | %-10s | %-12s | %-10s | %-12s\n" "序号" "国家" "IP 地址" "延迟Ping" "最大带宽" "系统评分" "连接状态"
+    echo "------------------------------------------------------------------------------------------------"
+    
+    for j in $(seq 1 $total_nodes); do
+        local ip="${node_ip[$j]}"
+        local score="${node_score[$j]}"
+        local ping="${node_ping[$j]}"
+        local speed="${node_speed[$j]}"
+        local country="${node_country[$j]}"
+        
         # 格式化宽带速率显示
         local speed_val="Unknown"
         if [[ "$speed" -gt 0 ]]; then
-            # 计算 Mbps 并保留一位小数
             local mbps=$(awk -v s="$speed" 'BEGIN {printf "%.1f", s/1000000}')
             speed_val="${mbps} Mbps"
         fi
@@ -504,22 +584,16 @@ connect_vpngate() {
         local ping_val="${ping} ms"
         if [[ "$ping" -le 0 ]]; then ping_val="Unknown"; fi
         
-        printf "\033[36m%-5s\033[0m | %-10s | %-15s | %-10s | %-12s | %-10s\n" "$i" "$country" "$ip" "$ping_val" "$speed_val" "$score"
+        # 读取后台进程测速结果
+        local status_val=$(cat "/tmp/vg_res_${j}.txt" 2>/dev/null)
+        [[ -z "$status_val" ]] && status_val="${RED}不可用${PLAIN}"
         
-        # 将数据缓存到数组中供用户选择
-        node_ip[$i]="$ip"
-        node_country[$i]="$country"
-        node_b64[$i]="$b64"
+        # 清理临时结果文件
+        rm -f "/tmp/vg_res_${j}.txt"
         
-        i=$((i+1))
-    done < /tmp/vg_top15.txt
-    echo "------------------------------------------------------------------------------------"
-    local total_nodes=$((i-1))
-    
-    if [[ "$total_nodes" -eq 0 ]]; then
-        warn "无可用的 VPN 节点。"
-        return
-    fi
+        printf "\033[36m%-5s\033[0m | %-10s | %-15s | %-10s | %-12s | %-10s | %b\n" "$j" "$country" "$ip" "$ping_val" "$speed_val" "$score" "$status_val"
+    done
+    echo "------------------------------------------------------------------------------------------------"
     
     # 引导用户选择
     local choice
