@@ -94,6 +94,13 @@ echo "[vpngate-down] 规则清理完毕！"
 exit 0
 EOF
     chmod +x "${OPENVPN_DIR}/vpngate-down.sh"
+
+    # 写入 vpngate.auth 默认账号密码文件 (vpn / vpn)
+    cat > "${OPENVPN_DIR}/vpngate.auth" << 'EOF'
+vpn
+vpn
+EOF
+    chmod 600 "${OPENVPN_DIR}/vpngate.auth"
 }
 
 # 写入配置文件模板
@@ -624,12 +631,13 @@ connect_vpngate() {
         err "VPN 节点 Base64 配置文件解码失败！"
     fi
     
-    # 动态改写 OpenVPN 配置参数，清洗掉任何带前导空格的默认网关与路由指令（忽略大小写，保留 route-nopull）
-    grep -v -i -E '^[[:space:]]*(dev|redirect-gateway|route-gateway|route[[:space:]]+[0-9]|dhcp-option)' /tmp/vg_decoded.ovpn > "$VPNGATE_OVPN"
+    # 动态改写 OpenVPN 配置参数，清洗掉任何带前导空格的默认网关、路由指令以及旧的认证选项（忽略大小写，保留 route-nopull）
+    grep -v -i -E '^[[:space:]]*(dev|redirect-gateway|route-gateway|route[[:space:]]+[0-9]|dhcp-option|auth-user-pass)' /tmp/vg_decoded.ovpn > "$VPNGATE_OVPN"
     
     cat >> "$VPNGATE_OVPN" <<EOF
 
-# 以下由 sb-vpngate 脚本自动注入，用于配置策略路由分流
+# 以下由 sb-vpngate 脚本自动注入，用于配置认证与策略路由分流
+auth-user-pass /etc/openvpn/vpngate.auth
 dev tun-vpngate
 route-nopull
 script-security 2
