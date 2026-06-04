@@ -63,9 +63,11 @@ detect_arch() {
 write_routing_scripts() {
     # 自动创建并修复 /dev/net/tun 设备节点
     if [[ ! -c /dev/net/tun ]]; then
-        mkdir -p /dev/net/tun
+        # 清除可能被错误创建的同名目录
+        rm -rf /dev/net/tun 2>/dev/null
+        mkdir -p /dev/net
         mknod /dev/net/tun c 10 200 2>/dev/null
-        chmod 600 /dev/net/tun
+        chmod 600 /dev/net/tun 2>/dev/null
     fi
     modprobe tun >/dev/null 2>&1
 
@@ -650,6 +652,7 @@ auth-user-pass /etc/openvpn/vpngate.auth
 dev tun-vpngate
 route-nopull
 pull-filter ignore "dhcp-option"
+pull-filter ignore "redirect-gateway"
 data-ciphers AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305:AES-256-CBC:AES-128-CBC
 script-security 2
 up /etc/openvpn/vpngate-up.sh
