@@ -313,7 +313,13 @@ get_random_port() {
 
 # 配置入站环境参数
 configure_inbounds() {
-    info "开始配置 sing-box 入站参数..."
+    # 核心前置校验：如果还没有执行过选项 1 安装 sing-box 内核，则拦截配置
+    if [[ ! -x "/usr/local/bin/sing-box" ]]; then
+        warn "检测到 sing-box 内核尚未安装！请先选择【选项 1】安装依赖和内核后再进行配置。"
+        return 1
+    fi
+
+    info "开始配置 sing-box 入站 parameters..."
     
     read -p "设置 VLESS-Reality 监听端口 [默认随机]: " input_port_vl
     if [[ -z "$input_port_vl" ]]; then
@@ -545,8 +551,8 @@ connect_vpngate() {
         err "VPN 节点 Base64 配置文件解码失败！"
     fi
     
-    # 动态改写 OpenVPN 配置参数，清洗掉原有的默认网关替换，并绑定自定义网卡与 up/down 路由策略
-    grep -v -E '^(dev |redirect-gateway|route-gateway|dhcp-option DNS)' /tmp/vg_decoded.ovpn > "$VPNGATE_OVPN"
+    # 动态改写 OpenVPN 配置参数，清洗掉任何带前导空格的默认网关与路由指令（忽略大小写，保留 route-nopull）
+    grep -v -i -E '^[[:space:]]*(dev|redirect-gateway|route-gateway|route[[:space:]]+[0-9]|dhcp-option)' /tmp/vg_decoded.ovpn > "$VPNGATE_OVPN"
     
     cat >> "$VPNGATE_OVPN" <<EOF
 
@@ -667,22 +673,28 @@ view_status_and_links() {
         echo -e "sing-box 运行状态: ${GREEN}运行中 (Active)${PLAIN}"
     else
         echo -e "sing-box 运行状态: ${RED}已停止 (Inactive)${PLAIN}"
+        echo -e "${RED}--- sing-box 最近的错误日志 ---${PLAIN}"
+        journalctl -u sing-box --no-pager -n 15
+        echo -e "${RED}-------------------------------${PLAIN}"
     fi
     
     # 检测 OpenVPN
     if systemctl is-active --quiet openvpn-vpngate; then
         echo -e "VPN Gate 运行状态: ${GREEN}已连接 (Active)${PLAIN}"
         # 显示 VPN 节点出口 IP 归属地信息
-        if ip route show table 1000 | grep -q "default dev"; then
+        if ip route show table 1000 2>/dev/null | grep -q "default dev"; then
             local vpn_ip=$(curl -s4m5 --interface tun-vpngate icanhazip.com 2>/dev/null)
             if [[ -n "$vpn_ip" ]]; then
                 echo -e "VPN 节点实际出口 IP: ${CYAN}${vpn_ip}${PLAIN}"
             else
-                echo -e "VPN 节点实际出口 IP: ${YELLOW}已建立隧道，正在握手分配 IP...${PLAIN}"
+                echo -e "VPN 节点实际出口 IP: ${YELLOW}已建立隧道，正在配置并等待分配 IP...${PLAIN}"
             fi
         fi
     else
         echo -e "VPN Gate 运行状态: ${RED}未连接 (Inactive)${PLAIN}"
+        echo -e "${RED}--- openvpn-vpngate 最近的错误日志 ---${PLAIN}"
+        journalctl -u openvpn-vpngate --no-pager -n 15
+        echo -e "${RED}--------------------------------------${PLAIN}"
     fi
     
     # 显示当前的策略模式
