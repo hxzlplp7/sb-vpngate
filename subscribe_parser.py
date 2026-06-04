@@ -12,35 +12,17 @@ from concurrent.futures import ThreadPoolExecutor
 SUBSCRIPTION_URLS = [
     "https://raw.githubusercontent.com/PuddinCat/BestClash/refs/heads/main/proxies.yaml",
     "https://raw.githubusercontent.com/free-nodes/v2rayfree/main/v202606032",
-    "https://fn09.sp0502.xyz/nodes/14a5a27704e4475ce7bf687a2103b638",
-    "https://fn09.sp0502.xyz/nodes/bacc647434001f1375a7af64aa7b42c5",
-    "https://fn09.sp0502.xyz/nodes/248ccebb9915c02fd0f42be0b1c1cd95",
-    "https://fn09.sp0502.xyz/nodes/8b8098a888c0950f13743f60a849cd06",
-    "https://fn09.sp0502.xyz/nodes/35ac9a6e5aac32e12b26abe4dcb2de19",
-    "https://fn09.sp0502.xyz/nodes/2e76faa24d0e485caa2446d13986d974",
-    "https://fn09.sp0502.xyz/nodes/fd29cc4df1f30ecfe44f6419bb75d40b",
-    "https://fn09.sp0502.xyz/nodes/42b986f932bd17d0fc5a38c21ece65e3",
-    "https://fn09.sp0502.xyz/nodes/1d43a9f4f7a9e582cdfd692891b24b5b",
-    "https://fn09.sp0502.xyz/nodes/5155fd7b525491778e791bf12124aa38",
-    "https://fn09.sp0502.xyz/nodes/565f573024cc7bd950197902461bbd4c",
-    "https://fn09.sp0502.xyz/nodes/d7c8d91cfdc698b4f5ce12de5b420d2c",
-    "https://5kKWmk.tosslk.xyz/9c6c45fbcdf09b1f7e0a1bdd8c02e4eb",
     "https://raw.githubusercontent.com/shaoyouvip/free/refs/heads/main/all.yaml",
     "https://raw.githubusercontent.com/shaoyouvip/free/refs/heads/main/base64.txt",
     "https://proxy.v2gh.com/https://raw.githubusercontent.com/Pawdroid/Free-servers/main/sub",
-    "https://mirror.v2gh.com/https://raw.githubusercontent.com/Pawdroid/Free-servers/main/sub",
     "https://raw.githubusercontent.com/caijh/FreeProxiesScraper/master/Eternity",
     "https://raw.githubusercontent.com/caijh/FreeProxiesScraper/master/Eternity.yaml",
-    "https://2REeRj.tosslk.xyz/bb6ee19c4b761ed9fddd9ef67d3049dd",
     "https://raw.githubusercontent.com/hello-world-1989/cn-news/main/end-gfw-together",
     "https://raw.githubusercontent.com/hello-world-1989/cn-news/refs/heads/main/clash.yaml",
     "https://raw.githubusercontent.com/ssrsub/ssr/master/v2ray",
     "https://raw.githubusercontent.com/ssrsub/ssr/master/clash.yaml",
     "https://raw.githubusercontent.com/shaoyouvip/free/refs/heads/main/mihomo.yaml",
-    "https://dlconf.clashapps.cc/yaml/9ebbe501-eb58-c360-95cc-dae9cea09453.yaml",
-    "https://sub.pmsub.me/clash.yaml",
-    "https://sub.sharecentre.online/sub",
-    "https://sub.5112233.xyz/auto"
+    "https://dlconf.clashapps.cc/yaml/9ebbe501-eb58-c360-95cc-dae9cea09453.yaml"
 ]
 
 def decode_base64_safely(data):
