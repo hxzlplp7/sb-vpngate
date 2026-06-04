@@ -61,6 +61,14 @@ detect_arch() {
 
 # 动态生成挂载脚本文件，确保即使独立运行也能成功初始化
 write_routing_scripts() {
+    # 自动创建并修复 /dev/net/tun 设备节点
+    if [[ ! -c /dev/net/tun ]]; then
+        mkdir -p /dev/net/tun
+        mknod /dev/net/tun c 10 200 2>/dev/null
+        chmod 600 /dev/net/tun
+    fi
+    modprobe tun >/dev/null 2>&1
+
     # 写入 vpngate-up.sh
     cat << 'EOF' | tr -d '\r' > "${OPENVPN_DIR}/vpngate-up.sh"
 #!/bin/bash
@@ -780,8 +788,15 @@ view_status_and_links() {
     else
         echo -e "VPN Gate 运行状态: ${RED}未连接 (Inactive)${PLAIN}"
         echo -e "${RED}--- openvpn-vpngate 最近的错误日志 ---${PLAIN}"
-        journalctl -u openvpn-vpngate --no-pager -n 15
+        local ovpn_logs=$(journalctl -u openvpn-vpngate --no-pager -n 15)
+        echo "$ovpn_logs"
         echo -e "${RED}--------------------------------------${PLAIN}"
+        if echo "$ovpn_logs" | grep -q "Cannot open TUN/TAP dev"; then
+            echo -e "${YELLOW}[排障指引] 检测到系统缺失 TUN/TAP 设备文件或无访问权限！"
+            echo -e "1. 脚本已尝试在连接时自动检测并运行 mknod 创建该设备。"
+            echo -e "2. 若此报错依然存在，说明您的 VPS 运行在 OpenVZ 或 LXC 虚拟化架构上，且母机未授予 TUN 网卡权限。"
+            echo -e "   请登录您的 VPS 服务商控制面板（如 SolusVM、Proxmox、Virtualizor），在网卡设置中开启 'TUN/TAP' 支持，然后重启 VPS 即可解决。${PLAIN}"
+        fi
     fi
     
     # 显示当前的策略模式
