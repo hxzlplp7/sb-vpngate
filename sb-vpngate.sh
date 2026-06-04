@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 
 # ==============================================================================
-# sb-vpngate 一键配置及管理脚本 (纯 Bash 豪华版，无 Python 依赖)
-# 支持 sing-box 代理入站，及 VPN Gate/直连策略路由出站分流
+# sb-vpngate 一键配置及管理脚本 (纯 Bash 豪华版，无外部 Python 运行依赖)
+# 支持 sing-box 代理入站，及 免费代理节点/直连 链式出站分流
 # ==============================================================================
 
 # 颜色定义
@@ -19,8 +19,6 @@ SB_DIR="/etc/sing-box"
 ENV_FILE="${SB_DIR}/sb-vpngate.env"
 TEMPLATE_FILE="${SB_DIR}/sb-config.json.template"
 CONFIG_FILE="${SB_DIR}/config.json"
-OPENVPN_DIR="/etc/openvpn"
-VPNGATE_OVPN="${OPENVPN_DIR}/vpngate.ovpn"
 
 # 输出辅助函数
 info() { echo -e "${GREEN}[提示] $1${PLAIN}"; }
@@ -38,14 +36,19 @@ fi
 
 # 检查系统类型
 detect_os() {
-    if [[ -f /etc/redhat-release ]]; then
-        release="centos"
-    elif grep -q -E -i "debian" /etc/os-release; then
-        release="debian"
-    elif grep -q -E -i "ubuntu" /etc/os-release; then
-        release="ubuntu"
-    else
-        err "当前脚本仅支持 Debian, Ubuntu 或 CentOS 系统。"
+    if [[ -f /etc/os-release ]]; then
+        . /etc/os-release
+        release=$ID
+    fi
+    if [[ "$release" != "debian" && "$release" != "ubuntu" && "$release" != "centos" && "$release" != "rhel" && "$release" != "rocky" && "$release" != "almalinux" ]]; then
+        # 兼容处理
+        if grep -q -E -i "debian|ubuntu" /etc/os-release 2>/dev/null; then
+            release="debian"
+        elif grep -q -E -i "centos|rhel|rocky" /etc/os-release 2>/dev/null; then
+            release="centos"
+        else
+            err "当前脚本仅支持 Debian, Ubuntu 或 CentOS/RHEL 系列系统。"
+        fi
     fi
 }
 
@@ -59,58 +62,521 @@ detect_arch() {
     esac
 }
 
-# 动态生成挂载脚本文件，确保即使独立运行也能成功初始化
-write_routing_scripts() {
-    # 自动创建并修复 /dev/net/tun 设备节点
-    if [[ ! -c /dev/net/tun ]]; then
-        # 清除可能被错误创建的同名目录
-        rm -rf /dev/net/tun 2>/dev/null
-        mkdir -p /dev/net
-        mknod /dev/net/tun c 10 200 2>/dev/null
-        chmod 600 /dev/net/tun 2>/dev/null
-    fi
-    modprobe tun >/dev/null 2>&1
+# 写入订阅解析脚本 subscribe_parser.py
+write_subscribe_parser() {
+    cat << 'EOF' | tr -d '\r' > "${SB_DIR}/subscribe_parser.py"
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 
-    # 写入 vpngate-up.sh
-    cat << 'EOF' | tr -d '\r' > "${OPENVPN_DIR}/vpngate-up.sh"
-#!/bin/bash
-dev=$1
-local_ip=$4
-echo "[vpngate-up] 接口已启动: ${dev}, 本地分配 IP: ${local_ip}"
-ip route flush table 1000 2>/dev/null
-ip route add default dev "${dev}" table 1000
-if ! ip rule show | grep -q "fwmark 0x3e8"; then
-    ip rule add fwmark 1000 table 1000
-    echo "[vpngate-up] 策略路由规则 fwmark 1000 -> table 1000 添加成功"
-fi
-iptables -t nat -D POSTROUTING -o "${dev}" -j MASQUERADE 2>/dev/null
-iptables -t nat -A POSTROUTING -o "${dev}" -j MASQUERADE
-echo "[vpngate-up] NAT MASQUERADE 规则添加成功"
-exit 0
-EOF
-    chmod +x "${OPENVPN_DIR}/vpngate-up.sh"
+import base64
+import json
+import re
+import socket
+import urllib.request
+import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 
-    # 写入 vpngate-down.sh
-    cat << 'EOF' | tr -d '\r' > "${OPENVPN_DIR}/vpngate-down.sh"
-#!/bin/bash
-dev=$1
-echo "[vpngate-down] 接口已关闭: ${dev}，开始清理网络规则..."
-iptables -t nat -D POSTROUTING -o "${dev}" -j MASQUERADE 2>/dev/null
-while ip rule show | grep -q "fwmark 0x3e8"; do
-    ip rule del fwmark 1000 table 1000 2>/dev/null
-done
-ip route flush table 1000 2>/dev/null
-echo "[vpngate-down] 规则清理完毕！"
-exit 0
-EOF
-    chmod +x "${OPENVPN_DIR}/vpngate-down.sh"
+SUBSCRIPTION_URLS = [
+    "https://raw.githubusercontent.com/PuddinCat/BestClash/refs/heads/main/proxies.yaml",
+    "https://raw.githubusercontent.com/free-nodes/v2rayfree/main/v202606032",
+    "https://fn09.sp0502.xyz/nodes/14a5a27704e4475ce7bf687a2103b638",
+    "https://fn09.sp0502.xyz/nodes/bacc647434001f1375a7af64aa7b42c5",
+    "https://fn09.sp0502.xyz/nodes/248ccebb9915c02fd0f42be0b1c1cd95",
+    "https://fn09.sp0502.xyz/nodes/8b8098a888c0950f13743f60a849cd06",
+    "https://fn09.sp0502.xyz/nodes/35ac9a6e5aac32e12b26abe4dcb2de19",
+    "https://fn09.sp0502.xyz/nodes/2e76faa24d0e485caa2446d13986d974",
+    "https://fn09.sp0502.xyz/nodes/fd29cc4df1f30ecfe44f6419bb75d40b",
+    "https://fn09.sp0502.xyz/nodes/42b986f932bd17d0fc5a38c21ece65e3",
+    "https://fn09.sp0502.xyz/nodes/1d43a9f4f7a9e582cdfd692891b24b5b",
+    "https://fn09.sp0502.xyz/nodes/5155fd7b525491778e791bf12124aa38",
+    "https://fn09.sp0502.xyz/nodes/565f573024cc7bd950197902461bbd4c",
+    "https://fn09.sp0502.xyz/nodes/d7c8d91cfdc698b4f5ce12de5b420d2c",
+    "https://5kKWmk.tosslk.xyz/9c6c45fbcdf09b1f7e0a1bdd8c02e4eb",
+    "https://raw.githubusercontent.com/shaoyouvip/free/refs/heads/main/all.yaml",
+    "https://raw.githubusercontent.com/shaoyouvip/free/refs/heads/main/base64.txt",
+    "https://proxy.v2gh.com/https://raw.githubusercontent.com/Pawdroid/Free-servers/main/sub",
+    "https://mirror.v2gh.com/https://raw.githubusercontent.com/Pawdroid/Free-servers/main/sub",
+    "https://raw.githubusercontent.com/caijh/FreeProxiesScraper/master/Eternity",
+    "https://raw.githubusercontent.com/caijh/FreeProxiesScraper/master/Eternity.yaml",
+    "https://2REeRj.tosslk.xyz/bb6ee19c4b761ed9fddd9ef67d3049dd",
+    "https://raw.githubusercontent.com/hello-world-1989/cn-news/main/end-gfw-together",
+    "https://raw.githubusercontent.com/hello-world-1989/cn-news/refs/heads/main/clash.yaml",
+    "https://raw.githubusercontent.com/ssrsub/ssr/master/v2ray",
+    "https://raw.githubusercontent.com/ssrsub/ssr/master/clash.yaml",
+    "https://raw.githubusercontent.com/shaoyouvip/free/refs/heads/main/mihomo.yaml",
+    "https://dlconf.clashapps.cc/yaml/9ebbe501-eb58-c360-95cc-dae9cea09453.yaml",
+    "https://sub.pmsub.me/clash.yaml",
+    "https://sub.sharecentre.online/sub",
+    "https://sub.5112233.xyz/auto"
+]
 
-    # 写入 vpngate.auth 默认账号密码文件 (vpn / vpn)
-    cat << 'EOF' | tr -d '\r' > "${OPENVPN_DIR}/vpngate.auth"
-vpn
-vpn
+def decode_base64_safely(data):
+    if not data:
+        return None
+    if isinstance(data, bytes):
+        try:
+            data = data.decode('utf-8', errors='ignore')
+        except Exception:
+            return None
+    data = data.strip().replace('\r', '').replace('\n', '').replace(' ', '')
+    padding = len(data) % 4
+    if padding:
+        data += '=' * (4 - padding)
+    try:
+        return base64.b64decode(data).decode('utf-8', errors='ignore')
+    except Exception:
+        return None
+
+def fetch_url(url, timeout=8):
+    try:
+        req = urllib.request.Request(
+            url, 
+            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            return response.read(), url
+    except Exception:
+        return None, url
+
+def parse_vmess(link):
+    try:
+        b64_str = link[8:].split('#')[0]
+        decoded = decode_base64_safely(b64_str)
+        if not decoded:
+            return None
+        data = json.loads(decoded)
+        
+        port = data.get("port", 443)
+        try:
+            port = int(port)
+        except ValueError:
+            port = 443
+            
+        outbound = {
+            "type": "vmess",
+            "server": data.get("add"),
+            "server_port": port,
+            "uuid": data.get("id"),
+            "security": "auto",
+            "alter_id": int(data.get("aid", 0))
+        }
+        
+        net = str(data.get("net", "")).lower()
+        if net == "ws":
+            outbound["transport"] = {
+                "type": "ws",
+                "path": data.get("path", "/"),
+                "headers": {}
+            }
+            host = data.get("host")
+            if host:
+                outbound["transport"]["headers"]["Host"] = host
+        elif net == "grpc":
+            outbound["transport"] = {
+                "type": "grpc",
+                "service_name": data.get("path", "")
+            }
+            
+        tls = str(data.get("tls", "")).lower()
+        if tls == "tls":
+            outbound["tls"] = {
+                "enabled": True,
+                "server_name": data.get("sni") or data.get("host") or data.get("add")
+            }
+        return outbound
+    except Exception:
+        return None
+
+def parse_vless_or_trojan(link):
+    try:
+        parsed = urllib.parse.urlparse(link)
+        proto = parsed.scheme
+        uuid_or_pass = parsed.username or parsed.netloc.split('@')[0]
+        
+        host_port = parsed.netloc.split('@')[-1]
+        if ":" in host_port:
+            host, port_str = host_port.split(':', 1)
+            port = int(port_str.split('/')[0])
+        else:
+            host = host_port
+            port = 443
+            
+        if not host or not port:
+            return None
+            
+        query = urllib.parse.parse_qs(parsed.query)
+        
+        outbound = {
+            "type": proto,
+            "server": host,
+            "server_port": port
+        }
+        
+        if proto == "vless":
+            outbound["uuid"] = uuid_or_pass
+            flow = query.get("flow", [""])[0]
+            if flow:
+                outbound["flow"] = flow
+        else:
+            outbound["password"] = uuid_or_pass
+            
+        security = query.get("security", [""])[0].lower()
+        tls_enabled = security in ("tls", "reality") or "security=" in parsed.query
+        
+        if tls_enabled:
+            outbound["tls"] = {
+                "enabled": True,
+                "server_name": query.get("sni", [""])[0] or host
+            }
+            if security == "reality":
+                outbound["tls"]["reality"] = {
+                    "enabled": True,
+                    "public_key": query.get("pbk", [""])[0],
+                    "short_id": query.get("sid", [""])[0]
+                }
+                
+        network = query.get("type", [""])[0].lower()
+        if network == "ws":
+            outbound["transport"] = {
+                "type": "ws",
+                "path": query.get("path", ["/"])[0],
+                "headers": {}
+            }
+            ws_host = query.get("host", [""])[0]
+            if ws_host:
+                outbound["transport"]["headers"]["Host"] = ws_host
+        elif network == "grpc":
+            outbound["transport"] = {
+                "type": "grpc",
+                "service_name": query.get("serviceName", [""])[0]
+            }
+        return outbound
+    except Exception:
+        return None
+
+def parse_shadowsocks(link):
+    try:
+        parsed = urllib.parse.urlparse(link)
+        host = parsed.hostname
+        port = parsed.port
+        userinfo = parsed.username
+        
+        if not host or not port:
+            raw_b64 = link[5:].split('#')[0]
+            decoded = decode_base64_safely(raw_b64)
+            if decoded:
+                return parse_shadowsocks("ss://" + decoded)
+            return None
+            
+        method_pwd = decode_base64_safely(userinfo)
+        if not method_pwd:
+            method_pwd = userinfo
+            
+        if ":" not in method_pwd:
+            return None
+        method, password = method_pwd.split(":", 1)
+        
+        outbound = {
+            "type": "shadowsocks",
+            "server": host,
+            "server_port": int(port),
+            "method": method,
+            "password": password
+        }
+        return outbound
+    except Exception:
+        return None
+
+def parse_single_link(link):
+    link = link.strip()
+    if link.startswith("vmess://"):
+        return parse_vmess(link)
+    elif link.startswith("vless://") or link.startswith("trojan://"):
+        return parse_vless_or_trojan(link)
+    elif link.startswith("ss://"):
+        return parse_shadowsocks(link)
+    return None
+
+def convert_clash_to_singbox(data):
+    try:
+        t = data.get("type", "").lower()
+        server = data.get("server")
+        port = data.get("port")
+        if not server or not port:
+            return None
+            
+        port = int(port)
+        outbound = {
+            "type": t,
+            "server": server,
+            "server_port": port
+        }
+        
+        if t == "vmess":
+            outbound["uuid"] = data.get("uuid")
+            outbound["security"] = data.get("cipher", "auto")
+            outbound["alter_id"] = int(data.get("alterId", 0))
+            
+            net = str(data.get("network", "")).lower()
+            ws_opts = data.get("ws-opts", {})
+            if net == "ws":
+                outbound["transport"] = {
+                    "type": "ws",
+                    "path": ws_opts.get("path", "/"),
+                    "headers": {}
+                }
+                ws_host = ws_opts.get("headers", {}).get("Host") or data.get("servername")
+                if ws_host:
+                    outbound["transport"]["headers"]["Host"] = ws_host
+                    
+            if str(data.get("tls", "")).lower() == "true" or port == 443:
+                outbound["tls"] = {
+                    "enabled": True,
+                    "server_name": data.get("servername") or server
+                }
+                
+        elif t == "vless":
+            outbound["uuid"] = data.get("uuid")
+            outbound["flow"] = data.get("flow", "")
+            
+            tls = str(data.get("tls", "")).lower() == "true"
+            reality = str(data.get("reality", "")).lower() == "true"
+            if tls or reality:
+                outbound["tls"] = {
+                    "enabled": True,
+                    "server_name": data.get("servername") or server
+                }
+                if reality:
+                    outbound["tls"]["reality"] = {
+                        "enabled": True,
+                        "public_key": data.get("public-key"),
+                        "short_id": data.get("short-id")
+                    }
+                    
+            net = str(data.get("network", "")).lower()
+            if net == "ws":
+                ws_opts = data.get("ws-opts", {})
+                outbound["transport"] = {
+                    "type": "ws",
+                    "path": ws_opts.get("path", "/"),
+                    "headers": {}
+                }
+                ws_host = ws_opts.get("headers", {}).get("Host")
+                if ws_host:
+                    outbound["transport"]["headers"]["Host"] = ws_host
+            elif net == "grpc":
+                grpc_opts = data.get("grpc-opts", {})
+                outbound["transport"] = {
+                    "type": "grpc",
+                    "service_name": grpc_opts.get("grpc-service-name", "")
+                }
+                
+        elif t == "shadowsocks":
+            outbound["type"] = "shadowsocks"
+            outbound["method"] = data.get("cipher")
+            outbound["password"] = data.get("password")
+            
+        elif t == "trojan":
+            outbound["password"] = data.get("password")
+            outbound["tls"] = {
+                "enabled": True,
+                "server_name": data.get("sni") or data.get("servername") or server
+            }
+        else:
+            return None
+            
+        return outbound
+    except Exception:
+        return None
+
+def parse_clash_yaml(content):
+    nodes = []
+    lines = content.splitlines()
+    in_proxies = False
+    current_node = None
+    sub_key = None
+    sub_dict = {}
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+            
+        if not in_proxies:
+            if stripped.startswith("proxies:"):
+                in_proxies = True
+            continue
+            
+        leading_spaces = len(line) - len(line.lstrip(' '))
+        if leading_spaces == 0 and not stripped.startswith("proxies:"):
+            in_proxies = False
+            if current_node:
+                nodes.append(current_node)
+                current_node = None
+            continue
+            
+        if stripped.startswith("-"):
+            if current_node:
+                nodes.append(current_node)
+            current_node = {}
+            sub_key = None
+            sub_dict = {}
+            item_line = stripped[1:].strip()
+            if ":" in item_line:
+                k, v = item_line.split(":", 1)
+                k = k.strip().strip("'\"")
+                v = v.strip().strip("'\"")
+                current_node[k] = v
+            continue
+            
+        if current_node is not None:
+            if stripped.endswith(":"):
+                sub_key = stripped[:-1].strip().strip("'\"")
+                sub_dict = {}
+                current_node[sub_key] = sub_dict
+                continue
+                
+            if ":" in stripped:
+                k, v = stripped.split(":", 1)
+                k = k.strip().strip("'\"")
+                v = v.strip().strip("'\"")
+                if sub_key and leading_spaces > 4:
+                    sub_dict[k] = v
+                else:
+                    sub_key = None
+                    current_node[k] = v
+
+    if current_node:
+        nodes.append(current_node)
+        
+    sb_nodes = []
+    for c in nodes:
+        sb_node = convert_clash_to_singbox(c)
+        if sb_node:
+            sb_nodes.append(sb_node)
+    return sb_nodes
+
+def parse_mixed_subscription(content):
+    decoded = decode_base64_safely(content)
+    if decoded:
+        return parse_v2ray_urls(decoded)
+        
+    nodes = parse_v2ray_urls(content)
+    if nodes:
+        return nodes
+        
+    return parse_clash_yaml(content)
+
+def parse_v2ray_urls(content):
+    nodes = []
+    links = re.findall(r'(vmess://[a-zA-Z0-9+/=\-_]+|vless://[^\s]+|ss://[^\s]+|trojan://[^\s]+)', content)
+    for link in links:
+        node = parse_single_link(link)
+        if node:
+            nodes.append(node)
+    return nodes
+
+def resolve_ips_country(nodes):
+    ip_to_nodes = {}
+    ips_to_query = []
+    
+    for node in nodes:
+        server = node.get("server")
+        if not server:
+            continue
+        ip = server
+        if not re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', server):
+            try:
+                ip = socket.gethostbyname(server)
+            except Exception:
+                continue
+                
+        node["server_ip"] = ip
+        if ip not in ip_to_nodes:
+            ip_to_nodes[ip] = []
+            ips_to_query.append(ip)
+        ip_to_nodes[ip].append(node)
+        
+    batch_size = 100
+    results = {}
+    
+    for i in range(0, len(ips_to_query), batch_size):
+        chunk = ips_to_query[i:i+batch_size]
+        payload = [{"query": ip} for ip in chunk]
+        
+        try:
+            req = urllib.request.Request(
+                "http://ip-api.com/batch",
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"}
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                batch_res = json.loads(resp.read().decode("utf-8"))
+                for item in batch_res:
+                    query_ip = item.get("query")
+                    if query_ip:
+                        raw_c = item.get("country", "Unknown")
+                        c_code = item.get("countryCode", "XX")
+                        results[query_ip] = {
+                            "country": raw_c,
+                            "country_code": c_code,
+                            "isp": item.get("isp", "Unknown")
+                        }
+        except Exception:
+            pass
+            
+    valid_nodes = []
+    for ip, node_list in ip_to_nodes.items():
+        res = results.get(ip, {"country": "Unknown", "country_code": "XX", "isp": "Unknown"})
+        for node in node_list:
+            node["country"] = res["country"]
+            node["country_code"] = res["country_code"]
+            node["isp"] = res["isp"]
+            valid_nodes.append(node)
+            
+    return valid_nodes
+
+def main():
+    print("[Parser] 开始拉取所有免费节点源，共计 31 个订阅地址...", flush=True)
+    all_nodes = []
+    
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {executor.submit(fetch_url, url): url for url in SUBSCRIPTION_URLS}
+        for future in futures:
+            res, url = future.result()
+            if res:
+                try:
+                    content = res.decode('utf-8', errors='ignore')
+                    nodes = parse_mixed_subscription(content)
+                    all_nodes.extend(nodes)
+                    print(f"  -> 成功拉取并解析: {url.split('/')[-1]} | 获取节点: {len(nodes)} 个", flush=True)
+                except Exception as e:
+                    print(f"  -> 解析失败: {url.split('/')[-1]} | 错误: {e}", flush=True)
+            else:
+                print(f"  -> 网络超时或加载失败: {url.split('/')[-1]}", flush=True)
+                
+    unique_nodes = []
+    seen_keys = set()
+    for n in all_nodes:
+        fp = f"{n.get('type')}_{n.get('server')}_{n.get('server_port')}_{n.get('uuid') or n.get('password')}"
+        if fp not in seen_keys:
+            seen_keys.add(fp)
+            unique_nodes.append(n)
+            
+    print(f"[Parser] 获取到去重节点共计: {len(unique_nodes)} 个，开始批量查询地理归属 (IP-API Batch)...", flush=True)
+    
+    final_nodes = resolve_ips_country(unique_nodes)
+    
+    cache_path = "/etc/sing-box/nodes_cache.json"
+    with open(cache_path, "w", encoding="utf-8") as f:
+        json.dump(final_nodes, f, ensure_ascii=False, indent=2)
+        
+    print(f"[Parser] 数据缓存写入成功: {cache_path}，当前归属有效的节点共计: {len(final_nodes)} 个。", flush=True)
+
+if __name__ == "__main__":
+    main()
 EOF
-    chmod 600 "${OPENVPN_DIR}/vpngate.auth"
+    chmod +x "${SB_DIR}/subscribe_parser.py"
 }
 
 # 写入配置文件模板
@@ -167,6 +633,12 @@ write_config_template() {
         "max_early_data": 2048,
         "early_data_header_name": "Sec-WebSocket-Protocol"
       }
+    },
+    {
+      "type": "http",
+      "tag": "local-in",
+      "listen": "127.0.0.1",
+      "listen_port": 10080
     }
   ],
   "outbounds": [
@@ -174,11 +646,7 @@ write_config_template() {
       "type": "direct",
       "tag": "direct"
     },
-    {
-      "type": "direct",
-      "tag": "vpngate-out",
-      "routing_mark": 1000
-    },
+    PROXY_OUTBOUND_PLACEHOLDER,
     {
       "type": "block",
       "tag": "block"
@@ -189,6 +657,12 @@ write_config_template() {
       RULE_SET_PLACEHOLDER
     ],
     "rules": [
+      {
+        "inbound": [
+          "local-in"
+        ],
+        "outbound": "proxy-out"
+      },
       {
         "protocol": [
           "quic",
@@ -234,19 +708,18 @@ install_dependencies() {
     
     if [[ "$release" == "debian" || "$release" == "ubuntu" ]]; then
         apt-get update -y
-        apt-get install -y curl openvpn python3 iptables jq tar wget openssl
-    elif [[ "$release" == "centos" ]]; then
+        apt-get install -y curl python3 jq tar wget openssl
+    elif [[ "$release" == "centos" || "$release" == "rhel" || "$release" == "rocky" || "$release" == "almalinux" ]]; then
         yum install -y epel-release
         yum makecache
-        yum install -y curl openvpn python3 iptables jq tar wget openssl
+        yum install -y curl python3 jq tar wget openssl
     fi
     
     # 确保文件夹存在
     mkdir -p "$SB_DIR"
-    mkdir -p "$OPENVPN_DIR"
     
     # 写入挂载脚本与模板
-    write_routing_scripts
+    write_subscribe_parser
     write_config_template
     
     info "依赖软件和核心辅助脚本安装完成。"
@@ -260,7 +733,7 @@ get_latest_sing_box_version() {
         version=$(curl -Ls -o /dev/null -w %{url_effective} https://github.com/SagerNet/sing-box/releases/latest | grep -oP 'tag/v\K[0-9.]+' | head -n 1)
     fi
     if [[ -z "$version" ]]; then
-        version="1.11.2"  # 兜底默认版本
+        version="1.11.2"
     fi
     echo "$version"
 }
@@ -327,13 +800,12 @@ get_random_port() {
 
 # 配置入站环境参数
 configure_inbounds() {
-    # 核心前置校验：如果还没有执行过选项 1 安装 sing-box 内核，则拦截配置
     if [[ ! -x "/usr/local/bin/sing-box" ]]; then
         warn "检测到 sing-box 内核尚未安装！请先选择【选项 1】安装依赖和内核后再进行配置。"
         return 1
     fi
 
-    info "开始配置 sing-box 入站 parameters..."
+    info "开始配置 sing-box 入站参数..."
     
     read -p "设置 VLESS-Reality 监听端口 [默认随机]: " input_port_vl
     if [[ -z "$input_port_vl" ]]; then
@@ -356,14 +828,12 @@ configure_inbounds() {
         ym_vl_re="$input_sni"
     fi
     
-    # 生成 UUID
     if [[ -n "$UUID" ]]; then
         uuid_val="$UUID"
     else
         uuid_val=$(/usr/local/bin/sing-box generate uuid 2>/dev/null || cat /proc/sys/kernel/random/uuid)
     fi
     
-    # 生成 Reality 密钥对
     if [[ -n "$PRIVATE_KEY" && -n "$PUBLIC_KEY" ]]; then
         priv_key="$PRIVATE_KEY"
         pub_key="$PUBLIC_KEY"
@@ -373,14 +843,12 @@ configure_inbounds() {
         pub_key=$(echo "$keypair" | grep -i "PublicKey" | awk '{print $2}')
     fi
     
-    # 生成 ShortID
     if [[ -n "$SHORT_ID" ]]; then
         short_id_val="$SHORT_ID"
     else
         short_id_val=$(openssl rand -hex 8)
     fi
     
-    # 设置 VMess 路径
     if [[ -n "$PATH_VM_WS" ]]; then
         path_vm_ws_val="$PATH_VM_WS"
     else
@@ -398,9 +866,9 @@ PUBLIC_KEY="${pub_key}"
 SHORT_ID="${short_id_val}"
 PATH_VM_WS="${path_vm_ws_val}"
 ROUTING_MODE=${ROUTING_MODE:-1}
+SAVED_COUNTRY_FILTER="${SAVED_COUNTRY_FILTER}"
 EOF
 
-    # 更新全局配置变量
     PORT_VL_RE=${port_vl_re}
     PORT_VM_WS=${port_vm_ws}
     UUID="${uuid_val}"
@@ -415,29 +883,30 @@ EOF
 
 # 纯 Bash 生成并校验 config.json
 generate_config_json() {
-    # 每次生成配置前强制刷新模板文件，确保其版本与当前运行脚本百分百同步
     write_config_template
     
-    # 复制模板到临时配置文件
     cp "$TEMPLATE_FILE" "$CONFIG_FILE"
     
-    # 确定默认出站和分流路由规则
     local default_outbound
     local rules_json
     local rule_sets_json
     if [[ "${ROUTING_MODE:-1}" -eq 1 ]]; then
-        # 全局代理模式：中国流量直连，其余出站走 VPN Gate
-        default_outbound="vpngate-out"
+        default_outbound="proxy-out"
         rule_sets_json='{"tag": "geosite-cn", "type": "remote", "format": "binary", "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs", "download_detour": "direct"}, {"tag": "geoip-cn", "type": "remote", "format": "binary", "url": "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs", "download_detour": "direct"}'
         rules_json='{"rule_set": "geosite-cn", "outbound": "direct"}, {"rule_set": "geoip-cn", "outbound": "direct"}'
     else
-        # 规则分流模式：默认直连，境外常用服务走 VPN Gate
         default_outbound="direct"
         rule_sets_json='{"tag": "geosite-geolocation-!cn", "type": "remote", "format": "binary", "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-geolocation-!cn.srs", "download_detour": "direct"}, {"tag": "geoip-telegram", "type": "remote", "format": "binary", "url": "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-telegram.srs", "download_detour": "direct"}'
-        rules_json='{"rule_set": "geosite-geolocation-!cn", "outbound": "vpngate-out"}, {"rule_set": "geoip-telegram", "outbound": "vpngate-out"}'
+        rules_json='{"rule_set": "geosite-geolocation-!cn", "outbound": "proxy-out"}, {"rule_set": "geoip-telegram", "outbound": "proxy-out"}'
     fi
     
-    # 使用自定义定界符 '#' 执行 sed 替换，保证 Base64 中的 '/' 字符不引发 sed 语法报错
+    local selected_node_json
+    if [[ -f "${SB_DIR}/selected_node.json" ]]; then
+        selected_node_json=$(cat "${SB_DIR}/selected_node.json")
+    else
+        selected_node_json='{"type": "direct", "tag": "proxy-out"}'
+    fi
+    
     sed -i "s#PORT_VL_RE#${PORT_VL_RE}#g" "$CONFIG_FILE"
     sed -i "s#PORT_VM_WS#${PORT_VM_WS}#g" "$CONFIG_FILE"
     sed -i "s#UUID_VAL#${UUID}#g" "$CONFIG_FILE"
@@ -448,8 +917,8 @@ generate_config_json() {
     sed -i "s#DEFAULT_OUTBOUND_VAL#${default_outbound}#g" "$CONFIG_FILE"
     sed -i "s#RULE_SET_PLACEHOLDER#${rule_sets_json}#g" "$CONFIG_FILE"
     sed -i "s#ROUTE_RULES_PLACEHOLDER#${rules_json}#g" "$CONFIG_FILE"
+    sed -i "s#PROXY_OUTBOUND_PLACEHOLDER#${selected_node_json}#g" "$CONFIG_FILE"
     
-    # 使用 jq 校验 JSON 格式
     if jq . "$CONFIG_FILE" >/dev/null 2>&1; then
         info "config.json 已成功生成且通过语法合法性校验。"
     else
@@ -457,67 +926,51 @@ generate_config_json() {
     fi
 }
 
-# 测试单个 VPN 节点的连通性 (TCP/Ping 结合)
-test_node_connectivity() {
-    local b64="$1"
-    local ip="$2"
-    
-    # 解码
-    local ovpn=$(echo -n "$b64" | base64 -d 2>/dev/null)
-    [[ -z "$ovpn" ]] && ovpn=$(echo -n "$b64" | openssl base64 -d 2>/dev/null)
-    
-    if [[ -z "$ovpn" ]]; then
-        echo -e "${RED}解码失败${PLAIN}"
-        return 1
+# 测试单个 TCP 节点的连通性并返回 RTT 延迟 (ms)
+test_node_rtt() {
+    local ip="$1"
+    local port="$2"
+    local start_time=$(date +%s%N)
+    # 使用 Bash 自带 socket 测试 TCP 握手
+    if timeout 1.5 bash -c "</dev/tcp/${ip}/${port}" >/dev/null 2>&1; then
+        local end_time=$(date +%s%N)
+        local rtt=$(( (end_time - start_time) / 1000000 ))
+        echo "$rtt"
+    else
+        echo "9999"
     fi
+}
+
+# 更新并连接免费节点
+connect_vpngate() {
+    write_subscribe_parser
+    local cache_file="${SB_DIR}/nodes_cache.json"
+    local update_sub="n"
     
-    # 提取 remote 行及协议
-    local remote_line=$(echo "$ovpn" | grep -E '^remote[[:space:]]' | head -n 1)
-    local proto=$(echo "$ovpn" | grep -E '^proto[[:space:]]' | head -n 1 | awk '{print $2}' | tr '[:upper:]' '[:lower:]')
-    local port=$(echo "$remote_line" | awk '{print $3}')
-    
-    [[ -z "$port" ]] && port="443"
-    
-    # 优先测试 TCP 端口连通性 (使用 Bash 内置 Socket 提升速度与准确度)
-    if [[ "$remote_line" == *tcp* || "$proto" == *tcp* ]]; then
-        if timeout 1.2 bash -c "</dev/tcp/${ip}/${port}" >/dev/null 2>&1; then
-            echo -e "${GREEN}可用 (TCP)${PLAIN}"
-            return 0
+    if [[ "$1" == "auto" ]]; then
+        update_sub="n"
+    else
+        if [[ -f "$cache_file" ]]; then
+            read -p "是否更新免费订阅源节点？(y/N, 默认使用本地缓存): " update_sub
+            update_sub=$(echo "$update_sub" | tr '[:upper:]' '[:lower:]')
+        else
+            update_sub="y"
         fi
     fi
     
-    # 备用使用 Ping 测试
-    if ping -c 1 -W 1 "$ip" >/dev/null 2>&1; then
-        echo -e "${GREEN}可用 (Ping)${PLAIN}"
-        return 0
+    if [[ "$update_sub" == "y" ]]; then
+        info "正在从所有订阅源拉取最新节点并解析 IP 归属 (这可能需要 10-20 秒，请稍后)..."
+        python3 "${SB_DIR}/subscribe_parser.py"
     fi
     
-    echo -e "${RED}不可用${PLAIN}"
-    return 1
-}
-
-# 纯 Bash 交互式更新并连接 VPN Gate 节点
-connect_vpngate() {
-    write_routing_scripts
-    info "正在拉取 VPN Gate 可用节点列表..."
-    
-    # 抓取 CSV 节点原始数据并清洗，去掉开头的注释行与尾部的星号行
-    curl -sL --connect-timeout 12 "https://www.vpngate.net/api/iphone/" | grep -v '^#' | grep -v '^\*' | grep -v '^$' > /tmp/vg_raw.csv
-    if [[ ! -s /tmp/vg_raw.csv ]]; then
-        # 备用地址
-        curl -sL --connect-timeout 12 "http://mirror.vpngate.net/api/iphone/" | grep -v '^#' | grep -v '^\*' | grep -v '^$' > /tmp/vg_raw.csv
+    if [[ ! -f "$cache_file" ]]; then
+        err "未能生成节点缓存，请检查订阅源网络连通状况！"
     fi
     
-    if [[ ! -s /tmp/vg_raw.csv ]]; then
-        warn "拉取 VPN Gate 列表失败，请检查 VPS 的网络能否访问外网。"
-        return
-    fi
-    
-    # 提取当前可用国家的简称及各自的节点数量，按节点数降序排列
+    # 统计可用国家的简称及各自的节点数量
     local countries_summary
-    countries_summary=$(awk -F',' '{print $7}' /tmp/vg_raw.csv | sort | uniq -c | sort -rn | awk '{printf "%s(%s) ", $2, $1}' | sed 's/ $//')
+    countries_summary=$(jq -r '.[] | .country_code' "$cache_file" 2>/dev/null | sort | uniq -c | sort -rn | awk '{printf "%s(%s) ", $2, $1}' | sed 's/ $//')
 
-    # 提供国家/地区过滤筛选
     local country_filter
     if [[ "$1" == "auto" ]]; then
         country_filter="${SAVED_COUNTRY_FILTER}"
@@ -527,235 +980,166 @@ connect_vpngate() {
         read -p "过滤指定国家节点 (例如: JP, US, KR，直接回车显示所有评分最高节点): " country_filter
         country_filter=$(echo "$country_filter" | tr '[:lower:]' '[:upper:]')
         
-        # 持久化保存用户的国家过滤器选择到 env 环境变量文件中
         sed -i '/SAVED_COUNTRY_FILTER=/d' "$ENV_FILE" 2>/dev/null
         echo "SAVED_COUNTRY_FILTER=\"${country_filter}\"" >> "$ENV_FILE"
     fi
     
-    # 纯 Bash / awk 提取核心属性，并按评分 (Score) 进行倒序排序
+    # 筛选出符合条件的节点并取前 25 个
+    local nodes_json
     if [[ -n "$country_filter" ]]; then
-        awk -F',' -v country="$country_filter" '$7 == country {print $2 "|" $3 "|" $4 "|" $5 "|" $7 "|" $NF}' /tmp/vg_raw.csv | sort -t'|' -k2,2rn > /tmp/vg_sorted.txt
+        nodes_json=$(jq -c "[.[] | select(.country_code == \"${country_filter}\")] | .[0:25]" "$cache_file")
     else
-        awk -F',' '{print $2 "|" $3 "|" $4 "|" $5 "|" $7 "|" $NF}' /tmp/vg_raw.csv | sort -t'|' -k2,2rn > /tmp/vg_sorted.txt
+        nodes_json=$(jq -c ".[0:25]" "$cache_file")
     fi
     
-    if [[ ! -s /tmp/vg_sorted.txt ]]; then
-        warn "未找到匹配国家 [$country_filter] 的节点，展示所有节点列表。"
-        awk -F',' '{print $2 "|" $3 "|" $4 "|" $5 "|" $7 "|" $NF}' /tmp/vg_raw.csv | sort -t'|' -k2,2rn > /tmp/vg_sorted.txt
-    fi
-    
-    # 截取前 15 个节点展示
-    head -n 15 /tmp/vg_sorted.txt > /tmp/vg_top15.txt
-    
-    local i=1
-    declare -A node_ip
-    declare -A node_country
-    declare -A node_b64
-    declare -A node_score
-    declare -A node_ping
-    declare -A node_speed
-    
-    # 解析并缓存原始节点细节
-    while IFS='|' read -r ip score ping speed country b64; do
-        node_ip[$i]="$ip"
-        node_score[$i]="$score"
-        node_ping[$i]="$ping"
-        node_speed[$i]="$speed"
-        node_country[$i]="$country"
-        node_b64[$i]="$b64"
-        i=$((i+1))
-    done < /tmp/vg_top15.txt
-    local total_nodes=$((i-1))
-    
+    local total_nodes=$(echo "$nodes_json" | jq '. | length')
     if [[ "$total_nodes" -eq 0 ]]; then
-        warn "无可用的 VPN 节点。"
+        warn "未找到匹配国家 [${country_filter}] 的节点。"
         return
     fi
     
-    # 多进程并行执行连通性网络测试，提升显示响应速度
-    info "正在对前 ${total_nodes} 个节点进行并发连通性测试 (网络握手/Ping)..."
+    declare -A node_server
+    declare -A node_port
+    declare -A node_proto
+    declare -A node_country
+    declare -A node_isp
+    declare -A node_json_str
+    
+    # 展开解析
+    for j in $(seq 1 $total_nodes); do
+        local idx=$((j-1))
+        local item=$(echo "$nodes_json" | jq -c ".[${idx}]")
+        node_server[$j]=$(echo "$item" | jq -r '.server')
+        node_port[$j]=$(echo "$item" | jq -r '.server_port')
+        node_proto[$j]=$(echo "$item" | jq -r '.type')
+        node_country[$j]=$(echo "$item" | jq -r '.country')
+        node_isp[$j]=$(echo "$item" | jq -r '.isp')
+        # 将 tag 强制覆盖为 proxy-out，并移除 ip-api 探测产生的冗余属性以符合 sing-box json 约束
+        node_json_str[$j]=$(echo "$item" | jq -c '. + {tag: "proxy-out"} | del(.country, .country_code, .isp, .server_ip, .fetched_at)')
+    done
+    
+    # 多线程进行延迟测速
+    info "正在对前 ${total_nodes} 个节点进行并发连通性测试 (TCP 延迟)..."
     declare -A test_pids
     for j in $(seq 1 $total_nodes); do
         (
-            local res
-            res=$(test_node_connectivity "${node_b64[$j]}" "${node_ip[$j]}")
-            echo "$res" > "/tmp/vg_res_${j}.txt"
+            local rtt
+            rtt=$(test_node_rtt "${node_server[$j]}" "${node_port[$j]}")
+            echo "$rtt" > "/tmp/node_rtt_${j}.txt"
         ) &
         test_pids[$j]=$!
     done
     
-    # 等待所有后台网络检测子任务运行完毕
     for j in $(seq 1 $total_nodes); do
         wait ${test_pids[$j]} 2>/dev/null
     done
     
-    # 打印排版漂亮的表格
+    # 打印排版表格
     echo -e "\n------------------------------------------------------------------------------------------------"
-    printf "%-5s | %-10s | %-15s | %-10s | %-12s | %-10s | %-12s\n" "序号" "国家" "IP 地址" "延迟Ping" "最大带宽" "系统评分" "连接状态"
+    printf "%-5s | %-10s | %-12s | %-12s | %-8s | %-20s | %-12s\n" "序号" "协议" "延迟" "国家" "端口" "服务器地址" "网络提供商"
     echo "------------------------------------------------------------------------------------------------"
     
-    declare -A node_status
-    for j in $(seq 1 $total_nodes); do
-        local ip="${node_ip[$j]}"
-        local score="${node_score[$j]}"
-        local ping="${node_ping[$j]}"
-        local speed="${node_speed[$j]}"
-        local country="${node_country[$j]}"
-        
-        # 格式化宽带速率显示
-        local speed_val="Unknown"
-        if [[ "$speed" -gt 0 ]]; then
-            local mbps=$(awk -v s="$speed" 'BEGIN {printf "%.1f", s/1000000}')
-            speed_val="${mbps} Mbps"
-        fi
-        
-        local ping_val="${ping} ms"
-        if [[ "$ping" -le 0 ]]; then ping_val="Unknown"; fi
-        
-        # 读取后台进程测速结果
-        local status_val=$(cat "/tmp/vg_res_${j}.txt" 2>/dev/null)
-        [[ -z "$status_val" ]] && status_val="${RED}不可用${PLAIN}"
-        node_status[$j]="$status_val"
-        
-        # 清理临时结果文件
-        rm -f "/tmp/vg_res_${j}.txt"
-        
-        printf "\033[36m%-5s\033[0m | %-10s | %-15s | %-10s | %-12s | %-10s | %b\n" "$j" "$country" "$ip" "$ping_val" "$speed_val" "$score" "$status_val"
-    done
-    echo "------------------------------------------------------------------------------------------------"
-    # 自动轮询连接逻辑
-    local success=0
+    declare -A node_rtt
     local available_indices=()
     local unavailable_indices=()
     
     for j in $(seq 1 $total_nodes); do
-        if [[ "${node_status[$j]}" == *"可用"* ]]; then
-            available_indices+=($j)
-        else
+        local rtt=$(cat "/tmp/node_rtt_${j}.txt" 2>/dev/null)
+        rm -f "/tmp/node_rtt_${j}.txt"
+        [[ -z "$rtt" ]] && rtt="9999"
+        
+        node_rtt[$j]="$rtt"
+        local rtt_show="${rtt} ms"
+        if [[ "$rtt" -ge 9999 ]]; then
+            rtt_show="${RED}不可用${PLAIN}"
             unavailable_indices+=($j)
+        else
+            available_indices+=($j)
         fi
+        
+        printf "\033[36m%-5s\033[0m | %-10s | %-12b | %-12s | %-8s | %-20s | %-12s\n" "$j" "${node_proto[$j]}" "$rtt_show" "${node_country[$j]}" "${node_port[$j]}" "${node_server[$j]:0:18}..." "${node_isp[$j]}"
     done
+    echo "------------------------------------------------------------------------------------------------"
     
-    # 优先轮询可用节点，其次是不可用节点
-    local try_indices=("${available_indices[@]}" "${unavailable_indices[@]}")
+    # 在 Bash 中将可用组按 RTT 升序排列
+    local sorted_available_indices=()
+    if [[ "${#available_indices[@]}" -gt 0 ]]; then
+        sorted_available_indices=($(
+            for idx in "${available_indices[@]}"; do
+                echo "$idx ${node_rtt[$idx]}"
+            done | sort -k2,2n | awk '{print $1}'
+        ))
+    fi
+    
+    local try_indices=("${sorted_available_indices[@]}" "${unavailable_indices[@]}")
     local total_try=${#try_indices[@]}
-    info "已整理候选队列：优先尝试 ${#available_indices[@]} 个可用节点，其次尝试 ${#unavailable_indices[@]} 个备用节点。"
+    info "已整理候选队列：优先尝试 ${#sorted_available_indices[@]} 个可用节点，其次尝试 ${#unavailable_indices[@]} 个备用节点。"
     
+    local success=0
     local try_count=0
     for idx in "${try_indices[@]}"; do
         try_count=$((try_count+1))
-        local selected_ip="${node_ip[$idx]}"
-        local selected_country="${node_country[$idx]}"
-        local selected_b64="${node_b64[$idx]}"
-        local selected_score="${node_score[$idx]}"
-        local selected_ping="${node_ping[$idx]}"
+        local server_ip="${node_server[$idx]}"
+        local server_port="${node_port[$idx]}"
+        local proto="${node_proto[$idx]}"
+        local country="${node_country[$idx]}"
+        local rtt="${node_rtt[$idx]}"
+        local node_json="${node_json_str[$idx]}"
         
-        info "[自动连接] ($try_count/$total_try) 正在尝试节点: IP=${selected_ip} | 国家=${selected_country} | 评分=${selected_score} | 延迟=${selected_ping}ms"
+        info "[自动连接] ($try_count/$total_try) 正在尝试节点: 协议=${proto} | 服务器=${server_ip}:${server_port} | 国家=${country} | 延迟=${rtt}ms"
         
-        # 1. 安全地停止现有的 openvpn 客户端并清理路由表/网卡
-        systemctl stop openvpn-vpngate 2>/dev/null
-        if [[ -x "${OPENVPN_DIR}/vpngate-down.sh" ]]; then
-            "${OPENVPN_DIR}/vpngate-down.sh" tun-vpngate >/dev/null 2>&1
-        fi
-        sleep 1.5 # 给系统释放网卡充足时间
-
-        # 2. 解码 OVPN 配置文件
-        echo -n "$selected_b64" | base64 -d > /tmp/vg_decoded.ovpn 2>/dev/null
-        if [[ ! -s /tmp/vg_decoded.ovpn ]]; then
-            echo -n "$selected_b64" | openssl base64 -d > /tmp/vg_decoded.ovpn 2>/dev/null
-        fi
+        # 1. 缓存当前选择的 outbound json
+        echo "$node_json" > "${SB_DIR}/selected_node.json"
         
-        if [[ ! -s /tmp/vg_decoded.ovpn ]]; then
-            warn "[自动连接] 节点 Base64 配置文件解码失败，跳过该节点。"
-            continue
-        fi
+        # 2. 重新拼接生成 config.json
+        generate_config_json
         
-        # 3. 动态配置写入
-        grep -v -i -E '^[[:space:]]*(dev|redirect-gateway|route-gateway|route[[:space:]]+[0-9]|dhcp-option|auth-user-pass)' /tmp/vg_decoded.ovpn | tr -d '\r' > "$VPNGATE_OVPN"
+        # 3. 重启 sing-box 服务
+        systemctl restart sing-box
+        sleep 2
         
-        cat <<EOF | tr -d '\r' >> "$VPNGATE_OVPN"
-
-# 以下由 sb-vpngate 脚本自动注入，用于配置认证与策略路由分流
-auth-user-pass /etc/openvpn/vpngate.auth
-dev tun-vpngate
-route-nopull
-pull-filter ignore "dhcp-option"
-pull-filter ignore "redirect-gateway"
-data-ciphers AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305:AES-256-CBC:AES-128-CBC
-script-security 2
-up /etc/openvpn/vpngate-up.sh
-down /etc/openvpn/vpngate-down.sh
-EOF
-
-        # 4. 重新生成并启动服务
-        local openvpn_path=$(which openvpn)
-        [[ -z "$openvpn_path" ]] && openvpn_path="/usr/sbin/openvpn"
-        
-        cat <<EOF | tr -d '\r' > /etc/systemd/system/openvpn-vpngate.service
-[Unit]
-Description=VPN Gate OpenVPN Client Connection
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=${openvpn_path} --config ${VPNGATE_OVPN}
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-        systemctl daemon-reload
-        systemctl restart openvpn-vpngate
-        
-        # 5. 双指标状态监控，最长等待 15 秒
+        # 4. 连通性测试，最长等待 10 秒
         local connected=0
-        local check_timeout=15
+        local check_timeout=10
         for s in $(seq 1 $check_timeout); do
-            # 如果 OpenVPN 服务已经不活跃，说明启动崩溃（例如凭证被拒或底层隧道协商失败）
-            if ! systemctl is-active --quiet openvpn-vpngate; then
-                warn "  -> OpenVPN 客户端进程异常退出/连接被拒绝。"
+            if ! systemctl is-active --quiet sing-box; then
+                warn "  -> sing-box 进程异常退出！"
                 break
             fi
             
-            # 检测 tun-vpngate 网卡并确认分配了 IP
-            if ip addr show dev tun-vpngate 2>/dev/null | grep -q "inet"; then
-                # 进一步验证 table 1000 路由表中已经自动下发了默认网关
-                if ip route show table 1000 2>/dev/null | grep -q "default dev"; then
-                    connected=1
-                    break
-                fi
+            # 使用本地监听端口进行出站探测
+            if curl -s4m4 -x http://127.0.0.1:10080 icanhazip.com >/dev/null 2>&1; then
+                connected=1
+                break
             fi
             
-            # 打印等待进度
-            echo -ne "  -> 建立隧道中，等待分配 IP... (${s}/${check_timeout}s)\r"
+            echo -ne "  -> 代理出站测试中... (${s}/${check_timeout}s)\r"
             sleep 1
         done
-        echo "" # 清理换行
-
+        echo ""
+        
         if [[ "$connected" -eq 1 ]]; then
             success=1
-            local assigned_ip=$(ip addr show dev tun-vpngate 2>/dev/null | grep "inet" | awk '{print $2}' | cut -d'/' -f1)
-            info "🎉 节点连接成功！分配的内网 IP: ${assigned_ip}"
-            
-            # 校验外网 IP
-            local vpn_ip=$(curl -s4m5 --interface tun-vpngate icanhazip.com 2>/dev/null)
-            if [[ -n "$vpn_ip" ]]; then
-                info "VPN Gate 实际外网出口 IP: ${vpn_ip}"
+            info "🎉 节点连接成功！"
+            local ip_info=$(curl -s4m5 -x http://127.0.0.1:10080 ip-api.com/json/ 2>/dev/null)
+            if [[ -n "$ip_info" ]]; then
+                local vpn_ip=$(echo "$ip_info" | jq -r '.query' 2>/dev/null)
+                local vpn_country=$(echo "$ip_info" | jq -r '.country' 2>/dev/null)
+                local vpn_isp=$(echo "$ip_info" | jq -r '.isp' 2>/dev/null)
+                info "实际外网出站 IP: ${CYAN}${vpn_ip}${PLAIN} (${vpn_country} - ${vpn_isp})"
             fi
             break
         else
-            warn "[自动连接] 节点 ${selected_ip} 连接超时或建立隧道失败，正清理环境并切换至下一个节点..."
-            systemctl stop openvpn-vpngate 2>/dev/null
-            if [[ -x "${OPENVPN_DIR}/vpngate-down.sh" ]]; then
-                "${OPENVPN_DIR}/vpngate-down.sh" tun-vpngate >/dev/null 2>&1
-            fi
+            warn "[自动连接] 节点 ${server_ip} 代理出站测试失败，正清理并尝试下一个..."
         fi
     done
-
+    
     if [[ "$success" -ne 1 ]]; then
-        err "已尝试完候选队列中的所有节点，均未能成功建立连接。请稍后运行脚本重试，或尝试更换其他过滤国家！"
+        # 回退至直连
+        rm -f "${SB_DIR}/selected_node.json"
+        generate_config_json
+        systemctl restart sing-box
+        err "已尝试完候选队列中的所有节点，均未能成功连接。已重置为默认直连出站。"
     fi
 }
 
@@ -763,8 +1147,8 @@ EOF
 configure_routing_mode() {
     echo -e "\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
     cyan "请选择出站分流路由模式："
-    echo "1. 【全局代理模式】 (默认除 CN 中国大陆流量直连，其余所有出站全部走 VPN Gate)"
-    echo "2. 【规则分流模式】 (默认直连，仅境外主流服务如 Google/Netflix/Telegram 走 VPN Gate)"
+    echo "1. 【全局代理模式】 (默认除 CN 中国大陆流量直连，其余所有出站全部走代理出口)"
+    echo "2. 【规则分流模式】 (默认直连，仅境外主流服务如 Google/Netflix/Telegram 走代理出口)"
     read -p "请输入模式【1-2】[当前:${ROUTING_MODE:-1}]: " choice_mode
     
     case "$choice_mode" in
@@ -773,7 +1157,6 @@ configure_routing_mode() {
         *) warn "输入错误或保持默认，未修改路由模式。" ;;
     esac
     
-    # 写入环境变量并重新生成配置
     sed -i "s/ROUTING_MODE=.*/ROUTING_MODE=${ROUTING_MODE}/" "$ENV_FILE" 2>/dev/null || echo "ROUTING_MODE=${ROUTING_MODE}" >> "$ENV_FILE"
     
     if [[ -n "$UUID" ]]; then
@@ -792,27 +1175,13 @@ start_services() {
     
     systemctl restart sing-box
     info "sing-box 服务已启动/重启。"
-    
-    if [[ -f "$VPNGATE_OVPN" ]]; then
-        systemctl restart openvpn-vpngate
-        info "openvpn-vpngate 客户端已启动/重启。"
-    else
-        warn "未检测到已下载的 VPN Gate 节点配置，请执行选项 3 关联并启动 VPN Gate。"
-    fi
 }
 
 # 停止服务
 stop_services() {
     info "正在停止相关服务..."
     systemctl stop sing-box 2>/dev/null
-    systemctl stop openvpn-vpngate 2>/dev/null
-    
-    # 额外通过 vpngate-down.sh 清理策略路由和网卡规则，以防遗留
-    if [[ -x "${OPENVPN_DIR}/vpngate-down.sh" ]]; then
-        "${OPENVPN_DIR}/vpngate-down.sh" tun-vpngate 2>/dev/null
-    fi
-    
-    info "所有相关服务均已停止，策略路由规则已重置。"
+    info "所有相关服务均已停止。"
 }
 
 # 获取 VPS 外部公网 IP
@@ -830,9 +1199,33 @@ view_status_and_links() {
     local vps_ip=$(get_public_ip)
     
     echo -e "\n======================= 系统运行状态 ======================="
-    # 检测 sing-box
     if systemctl is-active --quiet sing-box; then
         echo -e "sing-box 运行状态: ${GREEN}运行中 (Active)${PLAIN}"
+        
+        # 显示代理出站节点详情
+        if [[ -f "${SB_DIR}/selected_node.json" ]]; then
+            local proto=$(jq -r '.type' "${SB_DIR}/selected_node.json" 2>/dev/null)
+            local server=$(jq -r '.server' "${SB_DIR}/selected_node.json" 2>/dev/null)
+            local port=$(jq -r '.server_port' "${SB_DIR}/selected_node.json" 2>/dev/null)
+            echo -e "代理出站节点:     ${CYAN}${proto}://${server}:${port}${PLAIN}"
+            
+            # 显示通过代理出站探测的真实 IP 及归属
+            local ip_info=$(curl -s4m5 -x http://127.0.0.1:10080 ip-api.com/json/ 2>/dev/null)
+            if [[ -n "$ip_info" ]]; then
+                local vpn_ip=$(echo "$ip_info" | jq -r '.query' 2>/dev/null)
+                local country=$(echo "$ip_info" | jq -r '.country' 2>/dev/null)
+                local isp=$(echo "$ip_info" | jq -r '.isp' 2>/dev/null)
+                if [[ -n "$vpn_ip" && "$vpn_ip" != "null" ]]; then
+                    echo -e "代理实际出口 IP:   ${CYAN}${vpn_ip}${PLAIN} (${country} - ${isp})"
+                else
+                    echo -e "代理实际出口 IP:   ${YELLOW}已拉起代理，但无法获取详细归属信息${PLAIN}"
+                fi
+            else
+                echo -e "代理实际出口 IP:   ${RED}代理通道似乎断开，无法连通外网${PLAIN}"
+            fi
+        else
+            echo -e "出站网络模式:     ${YELLOW}直连模式 (Direct)${PLAIN}"
+        fi
     else
         echo -e "sing-box 运行状态: ${RED}已停止 (Inactive)${PLAIN}"
         echo -e "${RED}--- sing-box 最近的错误日志 ---${PLAIN}"
@@ -840,60 +1233,18 @@ view_status_and_links() {
         echo -e "${RED}-------------------------------${PLAIN}"
     fi
     
-    # 检测 OpenVPN
-    if systemctl is-active --quiet openvpn-vpngate; then
-        echo -e "VPN Gate 运行状态: ${GREEN}服务已拉起 (Active)${PLAIN}"
-        # 显示 VPN 节点出口 IP 归属地与 ISP 信息
-        if ip route show table 1000 2>/dev/null | grep -q "default dev"; then
-            local ip_info=$(curl -s4m5 --interface tun-vpngate ip-api.com/json/ 2>/dev/null)
-            if [[ -n "$ip_info" ]]; then
-                local vpn_ip=$(echo "$ip_info" | jq -r '.query' 2>/dev/null)
-                local country=$(echo "$ip_info" | jq -r '.country' 2>/dev/null)
-                local isp=$(echo "$ip_info" | jq -r '.isp' 2>/dev/null)
-                if [[ -n "$vpn_ip" && "$vpn_ip" != "null" ]]; then
-                    echo -e "VPN 节点实际出口 IP: ${CYAN}${vpn_ip}${PLAIN} (${country} - ${isp})"
-                else
-                    echo -e "VPN 节点实际出口 IP: ${YELLOW}隧道已建立，但无法获取详细归属信息${PLAIN}"
-                fi
-            else
-                # 备用回退到 icanhazip
-                local vpn_ip=$(curl -s4m5 --interface tun-vpngate icanhazip.com 2>/dev/null)
-                if [[ -n "$vpn_ip" ]]; then
-                    echo -e "VPN 节点实际出口 IP: ${CYAN}${vpn_ip}${PLAIN}"
-                else
-                    echo -e "VPN 节点实际出口 IP: ${YELLOW}已建立隧道，正在配置并等待分配 IP...${PLAIN}"
-                fi
-            fi
-        else
-            echo -e "VPN 隧道状态: ${YELLOW}已拉起进程，但隧道尚未握手连接成功 (策略路由表 1000 仍为空)${PLAIN}"
-            echo -e "${YELLOW}[提示] 这可能是因为选定的 VPN Gate 节点暂时无法连接。若超过 30 秒仍未成功，请执行【选项 8】查看 OpenVPN 日志，或执行【选项 3】切换其他高评分节点。${PLAIN}"
-        fi
-    else
-        echo -e "VPN Gate 运行状态: ${RED}未连接 (Inactive)${PLAIN}"
-        echo -e "${RED}--- openvpn-vpngate 最近的错误日志 ---${PLAIN}"
-        local ovpn_logs=$(journalctl -u openvpn-vpngate --no-pager -n 15)
-        echo "$ovpn_logs"
-        echo -e "${RED}--------------------------------------${PLAIN}"
-        if echo "$ovpn_logs" | grep -q "Cannot open TUN/TAP dev"; then
-            echo -e "${YELLOW}[排障指引] 检测到系统缺失 TUN/TAP 设备文件或无访问权限！"
-            echo -e "1. 脚本已尝试在连接时自动检测并运行 mknod 创建该设备。"
-            echo -e "2. 若此报错依然存在，说明您的 VPS 运行在 OpenVZ 或 LXC 虚拟化架构上，且母机未授予 TUN 网卡权限。"
-            echo -e "   请登录您的 VPS 服务商控制面板（如 SolusVM、Proxmox、Virtualizor），在网卡设置中开启 'TUN/TAP' 支持，然后重启 VPS 即可解决。${PLAIN}"
-        fi
-    fi
-    
     # 检测自愈重连守护服务状态
     local keepalive_status="${RED}已关闭 (Inactive)${PLAIN}"
     if systemctl is-active --quiet vpngate-keepalive 2>/dev/null; then
         keepalive_status="${GREEN}运行中 (Active)${PLAIN}"
     fi
-    echo -e "断线自愈重连守护: ${keepalive_status}"
+    echo -e "断线自愈重连守护:  ${keepalive_status}"
     
     # 显示当前的策略模式
     if [[ "$ROUTING_MODE" -eq 2 ]]; then
-        echo -e "分流出站路由模式: ${CYAN}规则分流模式 (境外常用走 VPN，其余直连)${PLAIN}"
+        echo -e "分流出站路由模式:  ${CYAN}规则分流模式 (境外常用走代理，其余直连)${PLAIN}"
     else
-        echo -e "分流出站路由模式: ${CYAN}全局代理模式 (除中国流量直连，其余全部走 VPN)${PLAIN}"
+        echo -e "分流出站路由模式:  ${CYAN}全局代理模式 (除中国流量直连，其余全部走代理)${PLAIN}"
     fi
     
     if [[ -z "$UUID" ]]; then
@@ -929,12 +1280,10 @@ view_logs() {
     cyan "           请选择要查看的日志类型："
     echo " 1. 查看 sing-box 运行日志 (最后 50 行)"
     echo " 2. 实时滚动追踪 (tail -f) sing-box 日志"
-    echo " 3. 查看 openvpn-vpngate 运行日志 (最后 50 行)"
-    echo " 4. 实时滚动追踪 (tail -f) openvpn-vpngate 日志"
     echo " 0. 返回主菜单"
     echo "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
     local log_choice
-    read -p "请输入选项【0-4】: " log_choice
+    read -p "请输入选项【0-2】: " log_choice
     
     case "$log_choice" in
         1)
@@ -944,14 +1293,6 @@ view_logs() {
         2)
             info "开始实时追踪 sing-box 日志 (按 Ctrl+C 退出)..."
             journalctl -u sing-box -f
-            ;;
-        3)
-            info "正在拉取 openvpn-vpngate 运行日志 (最后 50 行)..."
-            journalctl -u openvpn-vpngate --no-pager -n 50
-            ;;
-        4)
-            info "开始实时追踪 openvpn-vpngate 日志 (按 Ctrl+C 退出)..."
-            journalctl -u openvpn-vpngate -f
             ;;
         0|*)
             info "返回主菜单。"
@@ -980,18 +1321,12 @@ uninstall_all() {
     
     # 删除 systemd 服务
     systemctl disable sing-box >/dev/null 2>&1
-    systemctl disable openvpn-vpngate >/dev/null 2>&1
     rm -f /etc/systemd/system/sing-box.service
-    rm -f /etc/systemd/system/openvpn-vpngate.service
     systemctl daemon-reload
     
     # 删除二进制核心与配置目录
     rm -f /usr/local/bin/sing-box
     rm -rf "$SB_DIR"
-    
-    # 清理 OpenVPN 配置
-    rm -f "$VPNGATE_OVPN"
-    rm -f "${OPENVPN_DIR}/vpngate-up.sh" "${OPENVPN_DIR}/vpngate-down.sh"
     
     info "卸载完成！所有组件、配置及服务均已清理完毕。"
     exit 0
@@ -1014,7 +1349,7 @@ toggle_keepalive() {
         # 写入监控脚本
         cat <<EOF | tr -d '\r' > /usr/local/bin/vpngate-keepalive.sh
 #!/bin/bash
-# VPN Gate 断线自愈监控守护脚本
+# 免费节点掉线自愈监控守护脚本
 ENV_FILE="/etc/sing-box/sb-vpngate.env"
 
 info() { echo -e "\033[32m[Keepalive] \$1\033[0m"; }
@@ -1028,19 +1363,19 @@ SCRIPT_PATH="${script_abs_path}"
 info "断线自愈监控已启动。检测周期: 60 秒。"
 
 while true; do
-    # 只有当用户主动拉起了 VPN 服务，我们才进行掉线监控
-    if systemctl is-active --quiet openvpn-vpngate; then
-        local test_ok=0
-        # 优先使用 curl 通过指定接口测试，其次使用 ping
-        if curl -s4m4 --interface tun-vpngate icanhazip.com >/dev/null 2>&1; then
-            test_ok=1
-        elif ping -I tun-vpngate -c 1 -W 3 8.8.8.8 >/dev/null 2>&1; then
-            test_ok=1
-        fi
-        
-        if [[ "\$test_ok" -eq 0 ]]; then
-            warn "⚠️ 检测到当前 VPN 通道断开或网络不可达！开始执行自动故障漂移自愈..."
-            bash "\${SCRIPT_PATH}" auto-connect
+    if systemctl is-active --quiet sing-box; then
+        # 只有在存在选定节点时才进行自愈探测，以防初始未配置而死循环
+        if [[ -f "/etc/sing-box/selected_node.json" ]]; then
+            local test_ok=0
+            # 通过本地 sing-box http 探测接口测试
+            if curl -s4m4 -x http://127.0.0.1:10080 icanhazip.com >/dev/null 2>&1; then
+                test_ok=1
+            fi
+            
+            if [[ "\$test_ok" -eq 0 ]]; then
+                warn "⚠️ 检测到代理出站通道断开或网络不可达！开始执行自动故障漂移自愈..."
+                bash "\${SCRIPT_PATH}" auto-connect
+            fi
         fi
     fi
     sleep 60
@@ -1052,7 +1387,7 @@ EOF
         cat <<EOF | tr -d '\r' > /etc/systemd/system/vpngate-keepalive.service
 [Unit]
 Description=VPN Gate Keepalive Monitor Daemon
-After=network.target openvpn-vpngate.service
+After=network.target sing-box.service
 
 [Service]
 Type=simple
@@ -1083,15 +1418,15 @@ main_menu() {
     fi
     
     echo -e "\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
-    cyan "           sing-box 入站 / VPN Gate 策略分流出站 一键脚本 (纯 Bash 版)"
-    echo " 1. 安装/更新 Sing-box & OpenVPN 依赖"
+    cyan "           sing-box 入站 / 免费节点链式策略分流出站 一键脚本 (纯 Bash 版)"
+    echo " 1. 安装/更新 Sing-box 依赖及主内核"
     echo " 2. 配置并生成 Sing-box 入站配置 (VLESS-Reality / VMess-WS)"
-    echo " 3. 选择并连接 VPN Gate 节点 (交互式更新)"
+    echo " 3. 更新并连接免费节点 (从 31 个订阅源自动抓取/测速/过滤)"
     echo " 4. 修改策略出站分流模式 (全局/规则分流)"
-    echo " 5. 启动服务 (sing-box & openvpn-vpngate)"
+    echo " 5. 启动服务 (sing-box)"
     echo " 6. 停止服务"
     echo " 7. 查看当前运行状态与配置连接信息"
-    echo " 8. 查看运行日志 (sing-box & openvpn)"
+    echo " 8. 查看运行日志"
     echo " 9. 彻底卸载本脚本服务"
     echo -e " 10. 开启/关闭 节点掉线自动重连守护服务 (当前: ${keepalive_status})"
     echo " 0. 退出脚本"
