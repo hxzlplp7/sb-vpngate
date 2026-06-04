@@ -516,12 +516,21 @@ connect_vpngate() {
     # 提取当前可用国家的简称及各自的节点数量，按节点数降序排列
     local countries_summary
     countries_summary=$(awk -F',' '{print $7}' /tmp/vg_raw.csv | sort | uniq -c | sort -rn | awk '{printf "%s(%s) ", $2, $1}' | sed 's/ $//')
-    echo -e "当前可用国家及节点数统计: \033[36m${countries_summary}\033[0m"
 
     # 提供国家/地区过滤筛选
     local country_filter
-    read -p "过滤指定国家节点 (例如: JP, US, KR，直接回车显示所有评分最高节点): " country_filter
-    country_filter=$(echo "$country_filter" | tr '[:lower:]' '[:upper:]')
+    if [[ "$1" == "auto" ]]; then
+        country_filter="${SAVED_COUNTRY_FILTER}"
+        info "[后台自愈] 检测到自动重连请求，使用历史国家过滤器: [${country_filter:-所有国家}]"
+    else
+        echo -e "当前可用国家及节点数统计: \033[36m${countries_summary}\033[0m"
+        read -p "过滤指定国家节点 (例如: JP, US, KR，直接回车显示所有评分最高节点): " country_filter
+        country_filter=$(echo "$country_filter" | tr '[:lower:]' '[:upper:]')
+        
+        # 持久化保存用户的国家过滤器选择到 env 环境变量文件中
+        sed -i '/SAVED_COUNTRY_FILTER=/d' "$ENV_FILE" 2>/dev/null
+        echo "SAVED_COUNTRY_FILTER=\"${country_filter}\"" >> "$ENV_FILE"
+    fi
     
     # 纯 Bash / awk 提取核心属性，并按评分 (Score) 进行倒序排序
     if [[ -n "$country_filter" ]]; then
@@ -834,13 +843,26 @@ view_status_and_links() {
     # 检测 OpenVPN
     if systemctl is-active --quiet openvpn-vpngate; then
         echo -e "VPN Gate 运行状态: ${GREEN}服务已拉起 (Active)${PLAIN}"
-        # 显示 VPN 节点出口 IP 归属地信息
+        # 显示 VPN 节点出口 IP 归属地与 ISP 信息
         if ip route show table 1000 2>/dev/null | grep -q "default dev"; then
-            local vpn_ip=$(curl -s4m5 --interface tun-vpngate icanhazip.com 2>/dev/null)
-            if [[ -n "$vpn_ip" ]]; then
-                echo -e "VPN 节点实际出口 IP: ${CYAN}${vpn_ip}${PLAIN}"
+            local ip_info=$(curl -s4m5 --interface tun-vpngate ip-api.com/json/ 2>/dev/null)
+            if [[ -n "$ip_info" ]]; then
+                local vpn_ip=$(echo "$ip_info" | jq -r '.query' 2>/dev/null)
+                local country=$(echo "$ip_info" | jq -r '.country' 2>/dev/null)
+                local isp=$(echo "$ip_info" | jq -r '.isp' 2>/dev/null)
+                if [[ -n "$vpn_ip" && "$vpn_ip" != "null" ]]; then
+                    echo -e "VPN 节点实际出口 IP: ${CYAN}${vpn_ip}${PLAIN} (${country} - ${isp})"
+                else
+                    echo -e "VPN 节点实际出口 IP: ${YELLOW}隧道已建立，但无法获取详细归属信息${PLAIN}"
+                fi
             else
-                echo -e "VPN 节点实际出口 IP: ${YELLOW}已建立隧道，正在配置并等待分配 IP...${PLAIN}"
+                # 备用回退到 icanhazip
+                local vpn_ip=$(curl -s4m5 --interface tun-vpngate icanhazip.com 2>/dev/null)
+                if [[ -n "$vpn_ip" ]]; then
+                    echo -e "VPN 节点实际出口 IP: ${CYAN}${vpn_ip}${PLAIN}"
+                else
+                    echo -e "VPN 节点实际出口 IP: ${YELLOW}已建立隧道，正在配置并等待分配 IP...${PLAIN}"
+                fi
             fi
         else
             echo -e "VPN 隧道状态: ${YELLOW}已拉起进程，但隧道尚未握手连接成功 (策略路由表 1000 仍为空)${PLAIN}"
@@ -859,6 +881,13 @@ view_status_and_links() {
             echo -e "   请登录您的 VPS 服务商控制面板（如 SolusVM、Proxmox、Virtualizor），在网卡设置中开启 'TUN/TAP' 支持，然后重启 VPS 即可解决。${PLAIN}"
         fi
     fi
+    
+    # 检测自愈重连守护服务状态
+    local keepalive_status="${RED}已关闭 (Inactive)${PLAIN}"
+    if systemctl is-active --quiet vpngate-keepalive 2>/dev/null; then
+        keepalive_status="${GREEN}运行中 (Active)${PLAIN}"
+    fi
+    echo -e "断线自愈重连守护: ${keepalive_status}"
     
     # 显示当前的策略模式
     if [[ "$ROUTING_MODE" -eq 2 ]]; then
@@ -943,6 +972,12 @@ uninstall_all() {
     
     stop_services
     
+    # 停止并删除重连守护进程
+    systemctl stop vpngate-keepalive >/dev/null 2>&1
+    systemctl disable vpngate-keepalive >/dev/null 2>&1
+    rm -f /etc/systemd/system/vpngate-keepalive.service
+    rm -f /usr/local/bin/vpngate-keepalive.sh
+    
     # 删除 systemd 服务
     systemctl disable sing-box >/dev/null 2>&1
     systemctl disable openvpn-vpngate >/dev/null 2>&1
@@ -962,10 +997,89 @@ uninstall_all() {
     exit 0
 }
 
+# 开启/关闭断线自动重连守护进程
+toggle_keepalive() {
+    if systemctl is-active --quiet vpngate-keepalive 2>/dev/null; then
+        info "正在关闭节点断线重连守护服务..."
+        systemctl stop vpngate-keepalive 2>/dev/null
+        systemctl disable vpngate-keepalive 2>/dev/null
+        rm -f /etc/systemd/system/vpngate-keepalive.service
+        rm -f /usr/local/bin/vpngate-keepalive.sh
+        systemctl daemon-reload
+        info "已成功关闭并注销守护服务。"
+    else
+        info "正在配置并开启节点断线重连守护服务..."
+        local script_abs_path=$(realpath "$0")
+        
+        # 写入监控脚本
+        cat <<EOF | tr -d '\r' > /usr/local/bin/vpngate-keepalive.sh
+#!/bin/bash
+# VPN Gate 断线自愈监控守护脚本
+ENV_FILE="/etc/sing-box/sb-vpngate.env"
+
+info() { echo -e "\033[32m[Keepalive] \$1\033[0m"; }
+warn() { echo -e "\033[33m[Keepalive] \$1\033[0m"; }
+
+# 引入配置
+[[ -f "\$ENV_FILE" ]] && source "\$ENV_FILE"
+
+SCRIPT_PATH="${script_abs_path}"
+
+info "断线自愈监控已启动。检测周期: 60 秒。"
+
+while true; do
+    # 只有当用户主动拉起了 VPN 服务，我们才进行掉线监控
+    if systemctl is-active --quiet openvpn-vpngate; then
+        local test_ok=0
+        # 优先使用 curl 通过指定接口测试，其次使用 ping
+        if curl -s4m4 --interface tun-vpngate icanhazip.com >/dev/null 2>&1; then
+            test_ok=1
+        elif ping -I tun-vpngate -c 1 -W 3 8.8.8.8 >/dev/null 2>&1; then
+            test_ok=1
+        fi
+        
+        if [[ "\$test_ok" -eq 0 ]]; then
+            warn "⚠️ 检测到当前 VPN 通道断开或网络不可达！开始执行自动故障漂移自愈..."
+            bash "\${SCRIPT_PATH}" auto-connect
+        fi
+    fi
+    sleep 60
+done
+EOF
+        chmod +x /usr/local/bin/vpngate-keepalive.sh
+
+        # 写入 systemd 服务
+        cat <<EOF | tr -d '\r' > /etc/systemd/system/vpngate-keepalive.service
+[Unit]
+Description=VPN Gate Keepalive Monitor Daemon
+After=network.target openvpn-vpngate.service
+
+[Service]
+Type=simple
+ExecStart=/bin/bash /usr/local/bin/vpngate-keepalive.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+        systemctl daemon-reload
+        systemctl enable vpngate-keepalive >/dev/null 2>&1
+        systemctl start vpngate-keepalive
+        info "🎉 守护服务已成功开启并启动！"
+    fi
+}
+
 # 主循环控制菜单
 main_menu() {
     if [[ -f "$ENV_FILE" ]]; then
         source "$ENV_FILE"
+    fi
+    
+    local keepalive_status="${RED}已关闭${PLAIN}"
+    if systemctl is-active --quiet vpngate-keepalive 2>/dev/null; then
+        keepalive_status="${GREEN}已开启${PLAIN}"
     fi
     
     echo -e "\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
@@ -979,9 +1093,10 @@ main_menu() {
     echo " 7. 查看当前运行状态与配置连接信息"
     echo " 8. 查看运行日志 (sing-box & openvpn)"
     echo " 9. 彻底卸载本脚本服务"
+    echo -e " 10. 开启/关闭 节点掉线自动重连守护服务 (当前: ${keepalive_status})"
     echo " 0. 退出脚本"
     echo "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
-    read -p "请输入数字选择选项【0-9】: " menu_choice
+    read -p "请输入数字选择选项【0-10】: " menu_choice
     
     case "$menu_choice" in
         1)
@@ -1013,18 +1128,33 @@ main_menu() {
         9)
             uninstall_all
             ;;
+        10)
+            toggle_keepalive
+            ;;
         0)
             cyan "感谢使用本脚本，退出。"
             exit 0
             ;;
         *)
-            warn "无效的输入选项，请输入数字 0 至 9。"
+            warn "无效的输入选项，请输入数字 0 至 10。"
             ;;
     esac
 }
 
 # 脚本入口
 main() {
+    detect_os
+    
+    # 后台自愈非交互式执行通道
+    if [[ "$1" == "auto-connect" ]]; then
+        if [[ -f "$ENV_FILE" ]]; then
+            source "$ENV_FILE"
+        fi
+        info "收到断线自愈触发，开始执行自动重新连接..."
+        connect_vpngate "auto"
+        exit 0
+    fi
+
     # 打印 ASCII 艺术字
     echo -e "${CYAN}"
     echo "   ____  ____    _   _ ____  _   _  ____    _  _____ _____ "
@@ -1033,8 +1163,6 @@ main() {
     echo "   ___) | |_) | | |_| |  __/| |\  | |_| |/ ___ \| | | |___ "
     echo "  |____/|____/   \___/|_|   |_| \_|\____/_/   \_\_| |_____|"
     echo -e "${PLAIN}"
-    
-    detect_os
     
     while true; do
         main_menu
