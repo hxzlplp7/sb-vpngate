@@ -459,7 +459,10 @@ write_config_template() {
       "type": "direct",
       "tag": "direct"
     },
-    PROXY_OUTBOUND_PLACEHOLDER,
+    {
+"type": "direct",
+"tag": "proxy-out"
+},
     {
       "type": "block",
       "tag": "block"
@@ -716,6 +719,9 @@ generate_config_json() {
     local selected_node_json
     if [[ -f "${SB_DIR}/selected_node.json" ]]; then
         selected_node_json=$(cat "${SB_DIR}/selected_node.json")
+        if ! echo "${selected_node_json}" | jq . >/dev/null 2>&1; then
+            selected_node_json='{"type": "direct", "tag": "proxy-out"}'
+        fi
     else
         selected_node_json='{"type": "direct", "tag": "proxy-out"}'
     fi
@@ -730,7 +736,10 @@ generate_config_json() {
     sed -i "s#DEFAULT_OUTBOUND_VAL#${default_outbound}#g" "$CONFIG_FILE"
     sed -i "s#RULE_SET_PLACEHOLDER#${rule_sets_json}#g" "$CONFIG_FILE"
     sed -i "s#ROUTE_RULES_PLACEHOLDER#${rules_json}#g" "$CONFIG_FILE"
-    sed -i "s#PROXY_OUTBOUND_PLACEHOLDER#${selected_node_json}#g" "$CONFIG_FILE"
+    # 使用 jq 进行类型安全、不依赖 sed 字符转义的 JSON 出站节点替换
+jq --argjson new_outbound "${selected_node_json}" \
+   '(.outbounds[] | select(.tag == "proxy-out")) = ($new_outbound + {"tag": "proxy-out"})' \
+   "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
     
     if jq . "$CONFIG_FILE" >/dev/null 2>&1; then
         info "config.json 已成功生成且通过语法合法性校验。"
