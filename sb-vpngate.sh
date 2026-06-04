@@ -168,6 +168,9 @@ write_config_template() {
     }
   ],
   "route": {
+    "rule_set": [
+      RULE_SET_PLACEHOLDER
+    ],
     "rules": [
       {
         "protocol": [
@@ -188,12 +191,6 @@ write_config_template() {
           "::1/128",
           "fc00::/7",
           "fe80::/10"
-        ],
-        "outbound": "direct"
-      },
-      {
-        "geosite": [
-          "private"
         ],
         "outbound": "direct"
       },
@@ -412,14 +409,17 @@ generate_config_json() {
     # 确定默认出站和分流路由规则
     local default_outbound
     local rules_json
+    local rule_sets_json
     if [[ "${ROUTING_MODE:-1}" -eq 1 ]]; then
         # 全局代理模式：中国流量直连，其余出站走 VPN Gate
         default_outbound="vpngate-out"
-        rules_json='{"geosite": ["cn"], "outbound": "direct"}, {"geoip": ["cn"], "outbound": "direct"}'
+        rule_sets_json='{"tag": "geosite-cn", "type": "remote", "format": "binary", "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs", "download_detour": "direct"}, {"tag": "geoip-cn", "type": "remote", "format": "binary", "url": "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs", "download_detour": "direct"}'
+        rules_json='{"rule_set": "geosite-cn", "outbound": "direct"}, {"rule_set": "geoip-cn", "outbound": "direct"}'
     else
         # 规则分流模式：默认直连，境外常用服务走 VPN Gate
         default_outbound="direct"
-        rules_json='{"geosite": ["geolocation-!cn", "netflix", "disney", "google", "telegram"], "outbound": "vpngate-out"}, {"geoip": ["telegram"], "outbound": "vpngate-out"}'
+        rule_sets_json='{"tag": "geosite-geolocation-!cn", "type": "remote", "format": "binary", "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-geolocation-!cn.srs", "download_detour": "direct"}, {"tag": "geoip-telegram", "type": "remote", "format": "binary", "url": "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-telegram.srs", "download_detour": "direct"}'
+        rules_json='{"rule_set": "geosite-geolocation-!cn", "outbound": "vpngate-out"}, {"rule_set": "geoip-telegram", "outbound": "vpngate-out"}'
     fi
     
     # 使用自定义定界符 '#' 执行 sed 替换，保证 Base64 中的 '/' 字符不引发 sed 语法报错
@@ -431,6 +431,7 @@ generate_config_json() {
     sed -i "s#SHORT_ID_VAL#${SHORT_ID}#g" "$CONFIG_FILE"
     sed -i "s#PATH_VM_WS_VAL#${PATH_VM_WS}#g" "$CONFIG_FILE"
     sed -i "s#DEFAULT_OUTBOUND_VAL#${default_outbound}#g" "$CONFIG_FILE"
+    sed -i "s#RULE_SET_PLACEHOLDER#${rule_sets_json}#g" "$CONFIG_FILE"
     sed -i "s#ROUTE_RULES_PLACEHOLDER#${rules_json}#g" "$CONFIG_FILE"
     
     # 使用 jq 校验 JSON 格式
