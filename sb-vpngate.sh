@@ -398,10 +398,8 @@ EOF
 
 # 纯 Bash 生成并校验 config.json
 generate_config_json() {
-    if [[ ! -f "$TEMPLATE_FILE" ]]; then
-        # 如果模板缺失，重新写入模板
-        write_config_template
-    fi
+    # 每次生成配置前强制刷新模板文件，确保其版本与当前运行脚本百分百同步
+    write_config_template
     
     # 复制模板到临时配置文件
     cp "$TEMPLATE_FILE" "$CONFIG_FILE"
