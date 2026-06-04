@@ -585,6 +585,7 @@ connect_vpngate() {
     printf "%-5s | %-10s | %-15s | %-10s | %-12s | %-10s | %-12s\n" "序号" "国家" "IP 地址" "延迟Ping" "最大带宽" "系统评分" "连接状态"
     echo "------------------------------------------------------------------------------------------------"
     
+    declare -A node_status
     for j in $(seq 1 $total_nodes); do
         local ip="${node_ip[$j]}"
         local score="${node_score[$j]}"
@@ -605,6 +606,7 @@ connect_vpngate() {
         # 读取后台进程测速结果
         local status_val=$(cat "/tmp/vg_res_${j}.txt" 2>/dev/null)
         [[ -z "$status_val" ]] && status_val="${RED}不可用${PLAIN}"
+        node_status[$j]="$status_val"
         
         # 清理临时结果文件
         rm -f "/tmp/vg_res_${j}.txt"
@@ -612,40 +614,57 @@ connect_vpngate() {
         printf "\033[36m%-5s\033[0m | %-10s | %-15s | %-10s | %-12s | %-10s | %b\n" "$j" "$country" "$ip" "$ping_val" "$speed_val" "$score" "$status_val"
     done
     echo "------------------------------------------------------------------------------------------------"
+    # 自动轮询连接逻辑
+    local success=0
+    local available_indices=()
+    local unavailable_indices=()
     
-    # 引导用户选择
-    local choice
-    while true; do
-        read -p "请选择要连接的节点序号【1-${total_nodes}】(输入 q 退出): " choice
-        if [[ "$choice" == "q" || "$choice" == "Q" ]]; then
-            info "操作取消。"
-            return
-        fi
-        if [[ "$choice" -ge 1 && "$choice" -le "$total_nodes" ]]; then
-            local selected_ip="${node_ip[$choice]}"
-            local selected_country="${node_country[$choice]}"
-            local selected_b64="${node_b64[$choice]}"
-            break
+    for j in $(seq 1 $total_nodes); do
+        if [[ "${node_status[$j]}" == *"可用"* ]]; then
+            available_indices+=($j)
         else
-            warn "请输入有效的数字序号。"
+            unavailable_indices+=($j)
         fi
     done
     
-    # 解码 base64
-    echo -n "$selected_b64" | base64 -d > /tmp/vg_decoded.ovpn 2>/dev/null
-    if [[ ! -s /tmp/vg_decoded.ovpn ]]; then
-        # 备用解码方式
-        echo -n "$selected_b64" | openssl base64 -d > /tmp/vg_decoded.ovpn 2>/dev/null
-    fi
+    # 优先轮询可用节点，其次是不可用节点
+    local try_indices=("${available_indices[@]}" "${unavailable_indices[@]}")
+    local total_try=${#try_indices[@]}
+    info "已整理候选队列：优先尝试 ${#available_indices[@]} 个可用节点，其次尝试 ${#unavailable_indices[@]} 个备用节点。"
     
-    if [[ ! -s /tmp/vg_decoded.ovpn ]]; then
-        err "VPN 节点 Base64 配置文件解码失败！"
-    fi
-    
-    # 动态改写 OpenVPN 配置参数，清洗掉任何带前导空格的默认网关、路由指令以及旧的认证选项（忽略大小写，保留 route-nopull），同时过滤掉 \r 换行符
-    grep -v -i -E '^[[:space:]]*(dev|redirect-gateway|route-gateway|route[[:space:]]+[0-9]|dhcp-option|auth-user-pass)' /tmp/vg_decoded.ovpn | tr -d '\r' > "$VPNGATE_OVPN"
-    
-    cat <<EOF | tr -d '\r' >> "$VPNGATE_OVPN"
+    local try_count=0
+    for idx in "${try_indices[@]}"; do
+        try_count=$((try_count+1))
+        local selected_ip="${node_ip[$idx]}"
+        local selected_country="${node_country[$idx]}"
+        local selected_b64="${node_b64[$idx]}"
+        local selected_score="${node_score[$idx]}"
+        local selected_ping="${node_ping[$idx]}"
+        
+        info "[自动连接] ($try_count/$total_try) 正在尝试节点: IP=${selected_ip} | 国家=${selected_country} | 评分=${selected_score} | 延迟=${selected_ping}ms"
+        
+        # 1. 安全地停止现有的 openvpn 客户端并清理路由表/网卡
+        systemctl stop openvpn-vpngate 2>/dev/null
+        if [[ -x "${OPENVPN_DIR}/vpngate-down.sh" ]]; then
+            "${OPENVPN_DIR}/vpngate-down.sh" tun-vpngate >/dev/null 2>&1
+        fi
+        sleep 1.5 # 给系统释放网卡充足时间
+
+        # 2. 解码 OVPN 配置文件
+        echo -n "$selected_b64" | base64 -d > /tmp/vg_decoded.ovpn 2>/dev/null
+        if [[ ! -s /tmp/vg_decoded.ovpn ]]; then
+            echo -n "$selected_b64" | openssl base64 -d > /tmp/vg_decoded.ovpn 2>/dev/null
+        fi
+        
+        if [[ ! -s /tmp/vg_decoded.ovpn ]]; then
+            warn "[自动连接] 节点 Base64 配置文件解码失败，跳过该节点。"
+            continue
+        fi
+        
+        # 3. 动态配置写入
+        grep -v -i -E '^[[:space:]]*(dev|redirect-gateway|route-gateway|route[[:space:]]+[0-9]|dhcp-option|auth-user-pass)' /tmp/vg_decoded.ovpn | tr -d '\r' > "$VPNGATE_OVPN"
+        
+        cat <<EOF | tr -d '\r' >> "$VPNGATE_OVPN"
 
 # 以下由 sb-vpngate 脚本自动注入，用于配置认证与策略路由分流
 auth-user-pass /etc/openvpn/vpngate.auth
@@ -659,13 +678,11 @@ up /etc/openvpn/vpngate-up.sh
 down /etc/openvpn/vpngate-down.sh
 EOF
 
-    info "选定节点 IP: ${selected_ip} (${selected_country})，配置写入成功。"
-    
-    # 重新生成守护服务
-    local openvpn_path=$(which openvpn)
-    [[ -z "$openvpn_path" ]] && openvpn_path="/usr/sbin/openvpn"
-    
-    cat <<EOF | tr -d '\r' > /etc/systemd/system/openvpn-vpngate.service
+        # 4. 重新生成并启动服务
+        local openvpn_path=$(which openvpn)
+        [[ -z "$openvpn_path" ]] && openvpn_path="/usr/sbin/openvpn"
+        
+        cat <<EOF | tr -d '\r' > /etc/systemd/system/openvpn-vpngate.service
 [Unit]
 Description=VPN Gate OpenVPN Client Connection
 After=network.target
@@ -680,15 +697,56 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
-    systemctl daemon-reload
-    systemctl restart openvpn-vpngate
-    info "已重新启动 openvpn-vpngate 客户端以应用新建立的 VPN 节点。"
-    sleep 3
-    
-    if systemctl is-active --quiet openvpn-vpngate; then
-        info "OpenVPN 服务正尝试连接建立隧道，分配 IP 可能需要 5-15 秒左右..."
-    else
-        warn "OpenVPN 服务拉起失败，请运行 systemctl status openvpn-vpngate 检查服务报错。"
+        systemctl daemon-reload
+        systemctl restart openvpn-vpngate
+        
+        # 5. 双指标状态监控，最长等待 15 秒
+        local connected=0
+        local check_timeout=15
+        for s in $(seq 1 $check_timeout); do
+            # 如果 OpenVPN 服务已经不活跃，说明启动崩溃（例如凭证被拒或底层隧道协商失败）
+            if ! systemctl is-active --quiet openvpn-vpngate; then
+                warn "  -> OpenVPN 客户端进程异常退出/连接被拒绝。"
+                break
+            fi
+            
+            # 检测 tun-vpngate 网卡并确认分配了 IP
+            if ip addr show dev tun-vpngate 2>/dev/null | grep -q "inet"; then
+                # 进一步验证 table 1000 路由表中已经自动下发了默认网关
+                if ip route show table 1000 2>/dev/null | grep -q "default dev"; then
+                    connected=1
+                    break
+                fi
+            fi
+            
+            # 打印等待进度
+            echo -ne "  -> 建立隧道中，等待分配 IP... (${s}/${check_timeout}s)\r"
+            sleep 1
+        done
+        echo "" # 清理换行
+
+        if [[ "$connected" -eq 1 ]]; then
+            success=1
+            local assigned_ip=$(ip addr show dev tun-vpngate 2>/dev/null | grep "inet" | awk '{print $2}' | cut -d'/' -f1)
+            info "🎉 节点连接成功！分配的内网 IP: ${assigned_ip}"
+            
+            # 校验外网 IP
+            local vpn_ip=$(curl -s4m5 --interface tun-vpngate icanhazip.com 2>/dev/null)
+            if [[ -n "$vpn_ip" ]]; then
+                info "VPN Gate 实际外网出口 IP: ${vpn_ip}"
+            fi
+            break
+        else
+            warn "[自动连接] 节点 ${selected_ip} 连接超时或建立隧道失败，正清理环境并切换至下一个节点..."
+            systemctl stop openvpn-vpngate 2>/dev/null
+            if [[ -x "${OPENVPN_DIR}/vpngate-down.sh" ]]; then
+                "${OPENVPN_DIR}/vpngate-down.sh" tun-vpngate >/dev/null 2>&1
+            fi
+        fi
+    done
+
+    if [[ "$success" -ne 1 ]]; then
+        err "已尝试完候选队列中的所有节点，均未能成功建立连接。请稍后运行脚本重试，或尝试更换其他过滤国家！"
     fi
 }
 
