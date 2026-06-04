@@ -907,48 +907,50 @@ connect_vpngate() {
         wait ${test_pids[$j]} 2>/dev/null
     done
     
-    # 打印排版表格
-    echo -e "\n------------------------------------------------------------------------------------------------"
-    printf "%-5s | %-10s | %-12s | %-12s | %-8s | %-20s | %-12s\n" "序号" "协议" "延迟" "国家" "端口" "服务器地址" "网络提供商"
-    echo "------------------------------------------------------------------------------------------------"
-    
-    declare -A node_rtt
-    local available_indices=()
-    local unavailable_indices=()
-    
-    for j in $(seq 1 $total_nodes); do
-        local rtt=$(cat "/tmp/node_rtt_${j}.txt" 2>/dev/null)
-        rm -f "/tmp/node_rtt_${j}.txt"
-        [[ -z "$rtt" ]] && rtt="9999"
-        
-        node_rtt[$j]="$rtt"
-        local rtt_show="${rtt} ms"
-        if [[ "$rtt" -ge 9999 ]]; then
-            rtt_show="${RED}不可用${PLAIN}"
-            unavailable_indices+=($j)
-        else
-            available_indices+=($j)
-        fi
-        
-        printf "\033[36m%-5s\033[0m | %-10s | %-12b | %-12s | %-8s | %-20s | %-12s\n" "$j" "${node_proto[$j]}" "$rtt_show" "${node_country[$j]}" "${node_port[$j]}" "${node_server[$j]:0:18}..." "${node_isp[$j]}"
-    done
-    echo "------------------------------------------------------------------------------------------------"
-    
-    # 在 Bash 中将可用组按 RTT 升序排列
-    local sorted_available_indices=()
-    if [[ "${#available_indices[@]}" -gt 0 ]]; then
-        sorted_available_indices=($(
-            for idx in "${available_indices[@]}"; do
-                echo "$idx ${node_rtt[$idx]}"
-            done | sort -k2,2n | awk '{print $1}'
-        ))
+# 打印表格（仅包含可用且已排序的节点）
+declare -A node_rtt
+local available_indices=()
+
+for j in $(seq 1 $total_nodes); do
+    local rtt=$(cat "/tmp/node_rtt_${j}.txt" 2>/dev/null)
+    rm -f "/tmp/node_rtt_${j}.txt"
+    [[ -z "$rtt" ]] && rtt="9999"
+    node_rtt[$j]="$rtt"
+    if [[ "$rtt" -lt 9999 ]]; then
+        available_indices+=($j)
     fi
-    
-    local try_indices=("${sorted_available_indices[@]}" "${unavailable_indices[@]}")
-    local total_try=${#try_indices[@]}
-    info "已整理候选队列：优先尝试 ${#sorted_available_indices[@]} 个可用节点，其次尝试 ${#unavailable_indices[@]} 个备用节点。"
-    
-    local success=0
+done
+
+local sorted_available_indices=()
+if [[ "${#available_indices[@]}" -gt 0 ]]; then
+    sorted_available_indices=($(
+        for idx in "${available_indices[@]}"; do
+            echo "$idx ${node_rtt[$idx]}"
+        done | sort -k2,2n | awk '{print $1}'
+    ))
+fi
+
+echo -e "\n------------------------------------------------------------------------------------------------"
+printf "%-5s | %-10s | %-12s | %-12s | %-8s | %-20s | %-12s\n" "序号" "协议" "延迟" "国家" "端口" "服务器地址" "网络提供商"
+echo "------------------------------------------------------------------------------------------------"
+
+local show_idx=1
+for idx in "${sorted_available_indices[@]}"; do
+    local rtt_show="${node_rtt[$idx]} ms"
+    printf "\033[36m%-5s\033[0m | %-10s | %-12b | %-12s | %-8s | %-20s | %-12s\n" "$show_idx" "${node_proto[$idx]}" "$rtt_show" "${node_country[$idx]}" "${node_port[$idx]}" "${node_server[$idx]:0:18}..." "${node_isp[$idx]}"
+    show_idx=$((show_idx+1))
+done
+echo "------------------------------------------------------------------------------------------------"
+
+local try_indices=("${sorted_available_indices[@]}")
+local total_try=${#try_indices[@]}
+if [[ "$total_try" -eq 0 ]]; then
+    warn "没有可用节点！"
+    return 1
+fi
+info "已整理候选队列：按延迟排序仅尝试这 ${total_try} 个可用节点（已过滤掉不可用节点）。"
+
+local success=0
     local try_count=0
     for idx in "${try_indices[@]}"; do
         try_count=$((try_count+1))
