@@ -699,9 +699,60 @@ EOF
 
 # 纯 Bash 生成并校验 config.json
 generate_config_json() {
-    write_config_template
+write_config_template
+
+# 自动检查入站关键环境变量，如果为空则静默生成默认配置，防止 sed 替换空值导致 JSON 语法损坏
+if [[ -z "${PORT_VL_RE}" || -z "${PORT_VM_WS}" || -z "${UUID}" || -z "${PRIVATE_KEY}" ]]; then
+    local port_vl_re
+    local port_vm_ws
+    local ym_vl_re
+    local uuid_val
+    local priv_key
+    local pub_key
+    local short_id_val
+    local path_vm_ws_val
+
+    if [[ -n "$PORT_VL_RE" ]]; then port_vl_re="$PORT_VL_RE"; else port_vl_re=$(get_random_port); fi
+    if [[ -n "$PORT_VM_WS" ]]; then port_vm_ws="$PORT_VM_WS"; else port_vm_ws=$(get_random_port); fi
+    if [[ -n "$YM_VL_RE" ]]; then ym_vl_re="$YM_VL_RE"; else ym_vl_re="apple.com"; fi
+    if [[ -n "$UUID" ]]; then uuid_val="$UUID"; else uuid_val=$(/usr/local/bin/sing-box generate uuid 2>/dev/null || cat /proc/sys/kernel/random/uuid); fi
     
-    cp "$TEMPLATE_FILE" "$CONFIG_FILE"
+    if [[ -n "$PRIVATE_KEY" && -n "$PUBLIC_KEY" ]]; then
+        priv_key="$PRIVATE_KEY"
+        pub_key="$PUBLIC_KEY"
+    else
+        local keypair=$(/usr/local/bin/sing-box generate reality-keypair 2>/dev/null)
+        priv_key=$(echo "$keypair" | grep -i "PrivateKey" | awk '{print $2}')
+        pub_key=$(echo "$keypair" | grep -i "PublicKey" | awk '{print $2}')
+    fi
+    
+    if [[ -n "$SHORT_ID" ]]; then short_id_val="$SHORT_ID"; else short_id_val=$(openssl rand -hex 8); fi
+    if [[ -n "$PATH_VM_WS" ]]; then path_vm_ws_val="$PATH_VM_WS"; else path_vm_ws_val="/${uuid_val}-vm"; fi
+
+    cat <<EOF | tr -d '\r' > "$ENV_FILE"
+PORT_VL_RE=${port_vl_re}
+PORT_VM_WS=${port_vm_ws}
+UUID="${uuid_val}"
+YM_VL_RE="${ym_vl_re}"
+PRIVATE_KEY="${priv_key}"
+PUBLIC_KEY="${pub_key}"
+SHORT_ID="${short_id_val}"
+PATH_VM_WS="${path_vm_ws_val}"
+ROUTING_MODE=${ROUTING_MODE:-1}
+SAVED_COUNTRY_FILTER="${SAVED_COUNTRY_FILTER}"
+EOF
+
+    PORT_VL_RE=${port_vl_re}
+    PORT_VM_WS=${port_vm_ws}
+    UUID="${uuid_val}"
+    YM_VL_RE="${ym_vl_re}"
+    PRIVATE_KEY="${priv_key}"
+    PUBLIC_KEY="${pub_key}"
+    SHORT_ID="${short_id_val}"
+    PATH_VM_WS="${path_vm_ws_val}"
+fi
+
+cp "$TEMPLATE_FILE" "$CONFIG_FILE"
     
     local default_outbound
     local rules_json
@@ -1240,7 +1291,7 @@ main_menu() {
     fi
     
     echo -e "\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
-    cyan "           sing-box 入站 / 免费节点链式策略分流出站 一键脚本 (纯 Bash 版)"
+    cyan "           sing-box 入站 / 免费节点链式策略分流出站 一键脚本
     echo " 1. 安装/更新 Sing-box 依赖及主内核"
     echo " 2. 配置并生成 Sing-box 入站配置 (VLESS-Reality / VMess-WS)"
     echo " 3. 更新并连接免费节点 (从 31 个订阅源自动抓取/测速/过滤)"
