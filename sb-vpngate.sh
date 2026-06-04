@@ -488,6 +488,7 @@ test_node_connectivity() {
 
 # 纯 Bash 交互式更新并连接 VPN Gate 节点
 connect_vpngate() {
+    write_routing_scripts
     info "正在拉取 VPN Gate 可用节点列表..."
     
     # 抓取 CSV 节点原始数据并清洗，去掉开头的注释行与尾部的星号行
