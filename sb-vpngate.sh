@@ -731,6 +731,43 @@ view_status_and_links() {
     echo -e "\n============================================================\n"
 }
 
+# 查看运行日志
+view_logs() {
+    echo -e "\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
+    cyan "           请选择要查看的日志类型："
+    echo " 1. 查看 sing-box 运行日志 (最后 50 行)"
+    echo " 2. 实时滚动追踪 (tail -f) sing-box 日志"
+    echo " 3. 查看 openvpn-vpngate 运行日志 (最后 50 行)"
+    echo " 4. 实时滚动追踪 (tail -f) openvpn-vpngate 日志"
+    echo " 0. 返回主菜单"
+    echo "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
+    local log_choice
+    read -p "请输入选项【0-4】: " log_choice
+    
+    case "$log_choice" in
+        1)
+            info "正在拉取 sing-box 运行日志 (最后 50 行)..."
+            journalctl -u sing-box --no-pager -n 50
+            ;;
+        2)
+            info "开始实时追踪 sing-box 日志 (按 Ctrl+C 退出)..."
+            journalctl -u sing-box -f
+            ;;
+        3)
+            info "正在拉取 openvpn-vpngate 运行日志 (最后 50 行)..."
+            journalctl -u openvpn-vpngate --no-pager -n 50
+            ;;
+        4)
+            info "开始实时追踪 openvpn-vpngate 日志 (按 Ctrl+C 退出)..."
+            journalctl -u openvpn-vpngate -f
+            ;;
+        0|*)
+            info "返回主菜单。"
+            return
+            ;;
+    esac
+}
+
 # 彻底卸载脚本与服务
 uninstall_all() {
     echo -e "\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
@@ -777,10 +814,11 @@ main_menu() {
     echo " 5. 启动服务 (sing-box & openvpn-vpngate)"
     echo " 6. 停止服务"
     echo " 7. 查看当前运行状态与配置连接信息"
-    echo " 8. 彻底卸载本脚本服务"
+    echo " 8. 查看运行日志 (sing-box & openvpn)"
+    echo " 9. 彻底卸载本脚本服务"
     echo " 0. 退出脚本"
     echo "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
-    read -p "请输入数字选择选项【0-8】: " menu_choice
+    read -p "请输入数字选择选项【0-9】: " menu_choice
     
     case "$menu_choice" in
         1)
@@ -807,6 +845,9 @@ main_menu() {
             view_status_and_links
             ;;
         8)
+            view_logs
+            ;;
+        9)
             uninstall_all
             ;;
         0)
@@ -814,7 +855,7 @@ main_menu() {
             exit 0
             ;;
         *)
-            warn "无效的输入选项，请输入数字 0 至 8。"
+            warn "无效的输入选项，请输入数字 0 至 9。"
             ;;
     esac
 }

@@ -61,7 +61,8 @@ chmod +x sb-vpngate.sh
 2. **执行 选项 2**：配置 VLESS-Reality 和 VMess-WS 的端口及参数。程序会自动检查端口占用，生成 UUID、Reality 密钥对与配置，并通过 `jq` 进行 JSON 语法校验。
 3. **执行 选项 3**：交互式更新并连接 VPN Gate。您可以输入国家简称（如 `JP` 过滤日本节点，或者回车查看全部），选择满意的节点序号后，脚本会自动拉起 OpenVPN 拨号建立隧道。
 4. **执行 选项 5**：启动所有服务（sing-box 和 openvpn-vpngate 客户端）。
-5. **执行 选项 7**：查看服务运行状态，并直接获取生成的 **VLESS/VMess 客户端订阅连接**，支持一键复制导入到 v2rayN, Shadowrocket 等软件。
+5. **执行 选项 7**：查看服务运行状态，并直接获取生成的 **VLESS/VMess 客户端订阅连接**。
+6. **执行 选项 8**：查看运行日志。支持静态查看 sing-box 或 openvpn 的最近 50 行日志，也支持进行实时滚动追踪 (`tail -f`)。
 
 ---
 
