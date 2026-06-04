@@ -10,19 +10,12 @@ import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 
 SUBSCRIPTION_URLS = [
-    "https://raw.githubusercontent.com/PuddinCat/BestClash/refs/heads/main/proxies.yaml",
     "https://raw.githubusercontent.com/free-nodes/v2rayfree/main/v202606032",
-    "https://raw.githubusercontent.com/shaoyouvip/free/refs/heads/main/all.yaml",
     "https://raw.githubusercontent.com/shaoyouvip/free/refs/heads/main/base64.txt",
     "https://proxy.v2gh.com/https://raw.githubusercontent.com/Pawdroid/Free-servers/main/sub",
     "https://raw.githubusercontent.com/caijh/FreeProxiesScraper/master/Eternity",
-    "https://raw.githubusercontent.com/caijh/FreeProxiesScraper/master/Eternity.yaml",
     "https://raw.githubusercontent.com/hello-world-1989/cn-news/main/end-gfw-together",
-    "https://raw.githubusercontent.com/hello-world-1989/cn-news/refs/heads/main/clash.yaml",
-    "https://raw.githubusercontent.com/ssrsub/ssr/master/v2ray",
-    "https://raw.githubusercontent.com/ssrsub/ssr/master/clash.yaml",
-    "https://raw.githubusercontent.com/shaoyouvip/free/refs/heads/main/mihomo.yaml",
-    "https://dlconf.clashapps.cc/yaml/9ebbe501-eb58-c360-95cc-dae9cea09453.yaml"
+    "https://raw.githubusercontent.com/ssrsub/ssr/master/v2ray"
 ]
 
 def decode_base64_safely(data):
@@ -214,165 +207,6 @@ def parse_single_link(link):
         return parse_shadowsocks(link)
     return None
 
-def convert_clash_to_singbox(data):
-    try:
-        t = data.get("type", "").lower()
-        server = data.get("server")
-        port = data.get("port")
-        if not server or not port:
-            return None
-            
-        port = int(port)
-        outbound = {
-            "type": t,
-            "server": server,
-            "server_port": port
-        }
-        
-        if t == "vmess":
-            outbound["uuid"] = data.get("uuid")
-            outbound["security"] = data.get("cipher", "auto")
-            outbound["alter_id"] = int(data.get("alterId", 0))
-            
-            net = str(data.get("network", "")).lower()
-            ws_opts = data.get("ws-opts", {})
-            if net == "ws":
-                outbound["transport"] = {
-                    "type": "ws",
-                    "path": ws_opts.get("path", "/"),
-                    "headers": {}
-                }
-                ws_host = ws_opts.get("headers", {}).get("Host") or data.get("servername")
-                if ws_host:
-                    outbound["transport"]["headers"]["Host"] = ws_host
-                    
-            if str(data.get("tls", "")).lower() == "true" or port == 443:
-                outbound["tls"] = {
-                    "enabled": True,
-                    "server_name": data.get("servername") or server
-                }
-                
-        elif t == "vless":
-            outbound["uuid"] = data.get("uuid")
-            outbound["flow"] = data.get("flow", "")
-            
-            tls = str(data.get("tls", "")).lower() == "true"
-            reality = str(data.get("reality", "")).lower() == "true"
-            if tls or reality:
-                outbound["tls"] = {
-                    "enabled": True,
-                    "server_name": data.get("servername") or server
-                }
-                if reality:
-                    outbound["tls"]["reality"] = {
-                        "enabled": True,
-                        "public_key": data.get("public-key"),
-                        "short_id": data.get("short-id")
-                    }
-                    
-            net = str(data.get("network", "")).lower()
-            if net == "ws":
-                ws_opts = data.get("ws-opts", {})
-                outbound["transport"] = {
-                    "type": "ws",
-                    "path": ws_opts.get("path", "/"),
-                    "headers": {}
-                }
-                ws_host = ws_opts.get("headers", {}).get("Host")
-                if ws_host:
-                    outbound["transport"]["headers"]["Host"] = ws_host
-            elif net == "grpc":
-                grpc_opts = data.get("grpc-opts", {})
-                outbound["transport"] = {
-                    "type": "grpc",
-                    "service_name": grpc_opts.get("grpc-service-name", "")
-                }
-                
-        elif t == "shadowsocks":
-            outbound["type"] = "shadowsocks"
-            outbound["method"] = data.get("cipher")
-            outbound["password"] = data.get("password")
-            
-        elif t == "trojan":
-            outbound["password"] = data.get("password")
-            outbound["tls"] = {
-                "enabled": True,
-                "server_name": data.get("sni") or data.get("servername") or server
-            }
-        else:
-            return None
-            
-        return outbound
-    except Exception:
-        return None
-
-def parse_clash_yaml(content):
-    nodes = []
-    lines = content.splitlines()
-    in_proxies = False
-    current_node = None
-    sub_key = None
-    sub_dict = {}
-
-    for line in lines:
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-            
-        if not in_proxies:
-            if stripped.startswith("proxies:"):
-                in_proxies = True
-            continue
-            
-        leading_spaces = len(line) - len(line.lstrip(' '))
-        if leading_spaces == 0 and not stripped.startswith("proxies:"):
-            in_proxies = False
-            if current_node:
-                nodes.append(current_node)
-                current_node = None
-            continue
-            
-        if stripped.startswith("-"):
-            if current_node:
-                nodes.append(current_node)
-            current_node = {}
-            sub_key = None
-            sub_dict = {}
-            item_line = stripped[1:].strip()
-            if ":" in item_line:
-                k, v = item_line.split(":", 1)
-                k = k.strip().strip("'\"")
-                v = v.strip().strip("'\"")
-                current_node[k] = v
-            continue
-            
-        if current_node is not None:
-            if stripped.endswith(":"):
-                sub_key = stripped[:-1].strip().strip("'\"")
-                sub_dict = {}
-                current_node[sub_key] = sub_dict
-                continue
-                
-            if ":" in stripped:
-                k, v = stripped.split(":", 1)
-                k = k.strip().strip("'\"")
-                v = v.strip().strip("'\"")
-                if sub_key and leading_spaces > 4:
-                    sub_dict[k] = v
-                else:
-                    sub_key = None
-                    current_node[k] = v
-
-    if current_node:
-        nodes.append(current_node)
-        
-    sb_nodes = []
-    for c in nodes:
-        sb_node = convert_clash_to_singbox(c)
-        if sb_node:
-            sb_nodes.append(sb_node)
-    return sb_nodes
-
 def parse_mixed_subscription(content):
     # 尝试 Base64 订阅
     decoded = decode_base64_safely(content)
@@ -380,12 +214,7 @@ def parse_mixed_subscription(content):
         return parse_v2ray_urls(decoded)
         
     # 如果解码失败，尝试直接作为 v2ray URLs 文本解析
-    nodes = parse_v2ray_urls(content)
-    if nodes:
-        return nodes
-        
-    # 否则作为 Clash YAML 结构解析
-    return parse_clash_yaml(content)
+    return parse_v2ray_urls(content)
 
 def parse_v2ray_urls(content):
     nodes = []
@@ -459,7 +288,7 @@ def resolve_ips_country(nodes):
     return valid_nodes
 
 def main():
-    print("[Parser] 开始拉取所有免费节点源，共计 31 个订阅地址...", flush=True)
+    print("[Parser] 开始拉取所有免费节点源，共计 6 个订阅地址...", flush=True)
     all_nodes = []
     
     with ThreadPoolExecutor(max_workers=10) as executor:
