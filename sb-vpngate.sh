@@ -640,6 +640,8 @@ connect_vpngate() {
 auth-user-pass /etc/openvpn/vpngate.auth
 dev tun-vpngate
 route-nopull
+pull-filter ignore "dhcp-option"
+data-ciphers AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305:AES-256-CBC:AES-128-CBC
 script-security 2
 up /etc/openvpn/vpngate-up.sh
 down /etc/openvpn/vpngate-down.sh
