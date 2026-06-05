@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 # ==============================================================================
-# sb-vpngate 一键配置及管理脚本 (纯 Bash 豪华版，无外部 Python 运行依赖)
+# sb-vpngate 一键配置及管理脚本
 # 支持 sing-box 代理入站，及 免费代理节点/直连 链式出站分流
 # ==============================================================================
 
@@ -448,6 +448,63 @@ write_config_template() {
       }
     },
     {
+      "type": "anytls",
+      "tag": "anytls-in",
+      "listen": "::",
+      "listen_port": PORT_ANYTLS,
+      "users": [
+        {
+          "password": "PASSWORD_VAL"
+        }
+      ],
+      "tls": {
+        "enabled": true,
+        "server_name": "YM_VL_RE_VAL",
+        "certificate_path": "CERT_PATH_VAL",
+        "key_path": "KEY_PATH_VAL"
+      }
+    },
+    {
+      "type": "hysteria2",
+      "tag": "hy2-in",
+      "listen": "::",
+      "listen_port": PORT_HY2,
+      "users": [
+        {
+          "password": "PASSWORD_VAL"
+        }
+      ],
+      "tls": {
+        "enabled": true,
+        "alpn": [
+          "h3"
+        ],
+        "certificate_path": "CERT_PATH_VAL",
+        "key_path": "KEY_PATH_VAL"
+      }
+    },
+    {
+      "type": "tuic",
+      "tag": "tuic-in",
+      "listen": "::",
+      "listen_port": PORT_TUIC,
+      "users": [
+        {
+          "uuid": "UUID_VAL",
+          "password": "PASSWORD_VAL"
+        }
+      ],
+      "congestion_control": "bbr",
+      "tls": {
+        "enabled": true,
+        "alpn": [
+          "h3"
+        ],
+        "certificate_path": "CERT_PATH_VAL",
+        "key_path": "KEY_PATH_VAL"
+      }
+    },
+    {
       "type": "http",
       "tag": "local-in",
       "listen": "127.0.0.1",
@@ -460,9 +517,9 @@ write_config_template() {
       "tag": "direct"
     },
     {
-"type": "direct",
-"tag": "proxy-out"
-},
+      "type": "direct",
+      "tag": "proxy-out"
+    },
     {
       "type": "block",
       "tag": "block"
@@ -614,42 +671,61 @@ get_random_port() {
     done
 }
 
-# 配置入站环境参数
 configure_inbounds() {
     if [[ ! -x "/usr/local/bin/sing-box" ]]; then
-        warn "检测到 sing-box 内核尚未安装！请先选择【选项 1】安装依赖和内核后再进行配置。"
+        warn "检测到 sing-box 内核未安装！请先选择 1 安装内核后再进行配置。"
         return 1
     fi
 
-    info "开始配置 sing-box 入站参数..."
-    
-    read -p "设置 VLESS-Reality 监听端口 [默认随机]: " input_port_vl
+    info "开始配置 VPS 代理入站规则..."
+
+    read -p "请输入 VLESS-Reality 端口 [默认: 随机]: " input_port_vl
     if [[ -z "$input_port_vl" ]]; then
         if [[ -n "$PORT_VL_RE" ]]; then port_vl_re="$PORT_VL_RE"; else port_vl_re=$(get_random_port); fi
     else
         port_vl_re="$input_port_vl"
     fi
-    
-    read -p "设置 VMess-WS 监听端口 [默认随机]: " input_port_vm
-    if [[ -z "$input_port_vm" ]]; then
-        if [[ -n "$PORT_VM_WS" ]]; then port_vm_ws="$PORT_VM_WS"; else port_vm_ws=$(get_random_port); fi
+
+    read -p "请输入 AnyTLS 端口 [默认: 随机]: " input_port_anytls
+    if [[ -z "$input_port_anytls" ]]; then
+        if [[ -n "$PORT_ANYTLS" ]]; then port_anytls="$PORT_ANYTLS"; else port_anytls=$(get_random_port); fi
     else
-        port_vm_ws="$input_port_vm"
+        port_anytls="$input_port_anytls"
     fi
-    
-    read -p "设置 VLESS-Reality 伪装 SNI 域名 [默认: apple.com]: " input_sni
+
+    read -p "请输入 Hysteria 2 端口 [默认: 随机]: " input_port_hy2
+    if [[ -z "$input_port_hy2" ]]; then
+        if [[ -n "$PORT_HY2" ]]; then port_hy2="$PORT_HY2"; else port_hy2=$(get_random_port); fi
+    else
+        port_hy2="$input_port_hy2"
+    fi
+
+    read -p "请输入 TUIC v5 端口 [默认: 随机]: " input_port_tuic
+    if [[ -z "$input_port_tuic" ]]; then
+        if [[ -n "$PORT_TUIC" ]]; then port_tuic="$PORT_TUIC"; else port_tuic=$(get_random_port); fi
+    else
+        port_tuic="$input_port_tuic"
+    fi
+
+    read -p "请输入 Reality/AnyTLS 伪装 SNI [默认: apple.com]: " input_sni
     if [[ -z "$input_sni" ]]; then
         if [[ -n "$YM_VL_RE" ]]; then ym_vl_re="$YM_VL_RE"; else ym_vl_re="apple.com"; fi
     else
         ym_vl_re="$input_sni"
     fi
-    
+
     if [[ -n "$UUID" ]]; then
         uuid_val="$UUID"
     else
         uuid_val=$(/usr/local/bin/sing-box generate uuid 2>/dev/null || cat /proc/sys/kernel/random/uuid)
     fi
-    
+
+    if [[ -n "$PASSWORD" ]]; then
+        password_val="$PASSWORD"
+    else
+        password_val=$(openssl rand -base64 12 | tr -d '/+=')
+    fi
+
     if [[ -n "$PRIVATE_KEY" && -n "$PUBLIC_KEY" ]]; then
         priv_key="$PRIVATE_KEY"
         pub_key="$PUBLIC_KEY"
@@ -658,7 +734,7 @@ configure_inbounds() {
         priv_key=$(echo "$keypair" | grep -i "PrivateKey" | awk '{print $2}')
         pub_key=$(echo "$keypair" | grep -i "PublicKey" | awk '{print $2}')
     fi
-    
+
     if [[ -n "$SHORT_ID" ]]; then
         short_id_val="$SHORT_ID"
     else
@@ -702,20 +778,25 @@ generate_config_json() {
 write_config_template
 
 # 自动检查入站关键环境变量，如果为空则静默生成默认配置，防止 sed 替换空值导致 JSON 语法损坏
-if [[ -z "${PORT_VL_RE}" || -z "${PORT_VM_WS}" || -z "${UUID}" || -z "${PRIVATE_KEY}" ]]; then
+if [[ -z "${PORT_VL_RE}" || -z "${PORT_ANYTLS}" || -z "${PORT_HY2}" || -z "${PORT_TUIC}" || -z "${UUID}" || -z "${PASSWORD}" ]]; then
     local port_vl_re
-    local port_vm_ws
+    local port_anytls
+    local port_hy2
+    local port_tuic
     local ym_vl_re
     local uuid_val
+    local password_val
     local priv_key
     local pub_key
     local short_id_val
-    local path_vm_ws_val
 
     if [[ -n "$PORT_VL_RE" ]]; then port_vl_re="$PORT_VL_RE"; else port_vl_re=$(get_random_port); fi
-    if [[ -n "$PORT_VM_WS" ]]; then port_vm_ws="$PORT_VM_WS"; else port_vm_ws=$(get_random_port); fi
+    if [[ -n "$PORT_ANYTLS" ]]; then port_anytls="$PORT_ANYTLS"; else port_anytls=$(get_random_port); fi
+    if [[ -n "$PORT_HY2" ]]; then port_hy2="$PORT_HY2"; else port_hy2=$(get_random_port); fi
+    if [[ -n "$PORT_TUIC" ]]; then port_tuic="$PORT_TUIC"; else port_tuic=$(get_random_port); fi
     if [[ -n "$YM_VL_RE" ]]; then ym_vl_re="$YM_VL_RE"; else ym_vl_re="apple.com"; fi
     if [[ -n "$UUID" ]]; then uuid_val="$UUID"; else uuid_val=$(/usr/local/bin/sing-box generate uuid 2>/dev/null || cat /proc/sys/kernel/random/uuid); fi
+    if [[ -n "$PASSWORD" ]]; then password_val="$PASSWORD"; else password_val=$(openssl rand -base64 12 | tr -d '/+='); fi
     
     if [[ -n "$PRIVATE_KEY" && -n "$PUBLIC_KEY" ]]; then
         priv_key="$PRIVATE_KEY"
@@ -727,76 +808,94 @@ if [[ -z "${PORT_VL_RE}" || -z "${PORT_VM_WS}" || -z "${UUID}" || -z "${PRIVATE_
     fi
     
     if [[ -n "$SHORT_ID" ]]; then short_id_val="$SHORT_ID"; else short_id_val=$(openssl rand -hex 8); fi
-    if [[ -n "$PATH_VM_WS" ]]; then path_vm_ws_val="$PATH_VM_WS"; else path_vm_ws_val="/${uuid_val}-vm"; fi
 
-    cat <<EOF | tr -d '\r' > "$ENV_FILE"
+    cat <<EOF | tr -d '
+' > "$ENV_FILE"
 PORT_VL_RE=${port_vl_re}
-PORT_VM_WS=${port_vm_ws}
+PORT_ANYTLS=${port_anytls}
+PORT_HY2=${port_hy2}
+PORT_TUIC=${port_tuic}
 UUID="${uuid_val}"
+PASSWORD="${password_val}"
 YM_VL_RE="${ym_vl_re}"
 PRIVATE_KEY="${priv_key}"
 PUBLIC_KEY="${pub_key}"
 SHORT_ID="${short_id_val}"
-PATH_VM_WS="${path_vm_ws_val}"
-ROUTING_MODE=${ROUTING_MODE:-1}
-SAVED_COUNTRY_FILTER="${SAVED_COUNTRY_FILTER}"
+ROUTING_MODE=\${ROUTING_MODE:-1}
+SAVED_COUNTRY_FILTER="\${SAVED_COUNTRY_FILTER}"
 EOF
 
     PORT_VL_RE=${port_vl_re}
-    PORT_VM_WS=${port_vm_ws}
+    PORT_ANYTLS=${port_anytls}
+    PORT_HY2=${port_hy2}
+    PORT_TUIC=${port_tuic}
     UUID="${uuid_val}"
+    PASSWORD="${password_val}"
     YM_VL_RE="${ym_vl_re}"
     PRIVATE_KEY="${priv_key}"
     PUBLIC_KEY="${pub_key}"
     SHORT_ID="${short_id_val}"
-    PATH_VM_WS="${path_vm_ws_val}"
+fi
+
+# 自动生成 10 年自签证书供 anytls / hysteria2 / tuic 共用
+if [[ ! -f "${SB_DIR}/self_signed.crt" || ! -f "${SB_DIR}/self_signed.key" ]]; then
+    mkdir -p "${SB_DIR}"
+    openssl req -x509 -nodes -newkey rsa:2048 \
+      -keyout "${SB_DIR}/self_signed.key" \
+      -out "${SB_DIR}/self_signed.crt" \
+      -subj "/CN=sb-inbound-self-signed" -days 3650 >/dev/null 2>&1
 fi
 
 cp "$TEMPLATE_FILE" "$CONFIG_FILE"
-    
-    local default_outbound
-    local rules_json
-    local rule_sets_json
-    if [[ "${ROUTING_MODE:-1}" -eq 1 ]]; then
-        default_outbound="proxy-out"
-        rule_sets_json='{"tag": "geosite-cn", "type": "remote", "format": "binary", "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs", "download_detour": "direct"}, {"tag": "geoip-cn", "type": "remote", "format": "binary", "url": "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs", "download_detour": "direct"}'
-        rules_json='{"rule_set": "geosite-cn", "outbound": "direct"}, {"rule_set": "geoip-cn", "outbound": "direct"}'
-    else
-        default_outbound="direct"
-        rule_sets_json='{"tag": "geosite-geolocation-!cn", "type": "remote", "format": "binary", "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-geolocation-!cn.srs", "download_detour": "direct"}, {"tag": "geoip-telegram", "type": "remote", "format": "binary", "url": "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-telegram.srs", "download_detour": "direct"}'
-        rules_json='{"rule_set": "geosite-geolocation-!cn", "outbound": "proxy-out"}, {"rule_set": "geoip-telegram", "outbound": "proxy-out"}'
-    fi
-    
-    local selected_node_json
-    if [[ -f "${SB_DIR}/selected_node.json" ]]; then
-        selected_node_json=$(cat "${SB_DIR}/selected_node.json")
-        if ! echo "${selected_node_json}" | jq . >/dev/null 2>&1; then
-            selected_node_json='{"type": "direct", "tag": "proxy-out"}'
-        fi
-    else
+
+local default_outbound
+local rules_json
+local rule_sets_json
+if [[ "${ROUTING_MODE:-1}" -eq 1 ]]; then
+    default_outbound="proxy-out"
+    rule_sets_json='{"tag": "geosite-cn", "type": "remote", "format": "binary", "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs", "download_detour": "direct"}, {"tag": "geoip-cn", "type": "remote", "format": "binary", "url": "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs", "download_detour": "direct"}'
+    rules_json='{"rule_set": "geosite-cn", "outbound": "direct"}, {"rule_set": "geoip-cn", "outbound": "direct"}'
+else
+    default_outbound="direct"
+    rule_sets_json='{"tag": "geosite-geolocation-!cn", "type": "remote", "format": "binary", "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-geolocation-!cn.srs", "download_detour": "direct"}, {"tag": "geoip-telegram", "type": "remote", "format": "binary", "url": "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-telegram.srs", "download_detour": "direct"}'
+    rules_json='{"rule_set": "geosite-geolocation-!cn", "outbound": "proxy-out"}, {"rule_set": "geoip-telegram", "outbound": "proxy-out"}'
+fi
+
+local selected_node_json
+if [[ -f "${SB_DIR}/selected_node.json" ]]; then
+    selected_node_json=$(cat "${SB_DIR}/selected_node.json")
+    if ! echo "${selected_node_json}" | jq . >/dev/null 2>&1; then
         selected_node_json='{"type": "direct", "tag": "proxy-out"}'
     fi
-    
-    sed -i "s#PORT_VL_RE#${PORT_VL_RE}#g" "$CONFIG_FILE"
-    sed -i "s#PORT_VM_WS#${PORT_VM_WS}#g" "$CONFIG_FILE"
-    sed -i "s#UUID_VAL#${UUID}#g" "$CONFIG_FILE"
-    sed -i "s#YM_VL_RE_VAL#${YM_VL_RE}#g" "$CONFIG_FILE"
-    sed -i "s#PRIVATE_KEY_VAL#${PRIVATE_KEY}#g" "$CONFIG_FILE"
-    sed -i "s#SHORT_ID_VAL#${SHORT_ID}#g" "$CONFIG_FILE"
-    sed -i "s#PATH_VM_WS_VAL#${PATH_VM_WS}#g" "$CONFIG_FILE"
-    sed -i "s#DEFAULT_OUTBOUND_VAL#${default_outbound}#g" "$CONFIG_FILE"
-    sed -i "s#RULE_SET_PLACEHOLDER#${rule_sets_json}#g" "$CONFIG_FILE"
-    sed -i "s#ROUTE_RULES_PLACEHOLDER#${rules_json}#g" "$CONFIG_FILE"
-    # 使用 jq 进行类型安全、不依赖 sed 字符转义的 JSON 出站节点替换
+else
+    selected_node_json='{"type": "direct", "tag": "proxy-out"}'
+fi
+
+sed -i "s#PORT_VL_RE#${PORT_VL_RE}#g" "$CONFIG_FILE"
+sed -i "s#PORT_ANYTLS#${PORT_ANYTLS}#g" "$CONFIG_FILE"
+sed -i "s#PORT_HY2#${PORT_HY2}#g" "$CONFIG_FILE"
+sed -i "s#PORT_TUIC#${PORT_TUIC}#g" "$CONFIG_FILE"
+sed -i "s#UUID_VAL#${UUID}#g" "$CONFIG_FILE"
+sed -i "s#PASSWORD_VAL#${PASSWORD}#g" "$CONFIG_FILE"
+sed -i "s#YM_VL_RE_VAL#${YM_VL_RE}#g" "$CONFIG_FILE"
+sed -i "s#PRIVATE_KEY_VAL#${PRIVATE_KEY}#g" "$CONFIG_FILE"
+sed -i "s#SHORT_ID_VAL#${SHORT_ID}#g" "$CONFIG_FILE"
+sed -i "s#CERT_PATH_VAL#${SB_DIR}/self_signed.crt#g" "$CONFIG_FILE"
+sed -i "s#KEY_PATH_VAL#${SB_DIR}/self_signed.key#g" "$CONFIG_FILE"
+sed -i "s#DEFAULT_OUTBOUND_VAL#${default_outbound}#g" "$CONFIG_FILE"
+sed -i "s#RULE_SET_PLACEHOLDER#${rule_sets_json}#g" "$CONFIG_FILE"
+sed -i "s#ROUTE_RULES_PLACEHOLDER#${rules_json}#g" "$CONFIG_FILE"
+
+# 使用 jq 进行类型安全、不依赖 sed 字符转义的 JSON 出站节点替换
 jq --argjson new_outbound "${selected_node_json}" \
    '(.outbounds[] | select(.tag == "proxy-out")) = ($new_outbound + {"tag": "proxy-out"})' \
    "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
-    
-    if jq . "$CONFIG_FILE" >/dev/null 2>&1; then
-        info "config.json 已成功生成且通过语法合法性校验。"
-    else
-        err "生成的 config.json 存在语法错误，请检查配置文件模板！"
-    fi
+
+if jq . "$CONFIG_FILE" >/dev/null 2>&1; then
+    info "config.json 已成功生成且通过语法合法性校验。"
+else
+    err "生成的 config.json 存在语法错误，请检查配置文件模板！"
+fi
 }
 
 # 测试单个 TCP 节点的连通性并返回 RTT 延迟 (ms)
@@ -1074,19 +1173,20 @@ get_public_ip() {
 # 查看运行状态与客户端链接
 view_status_and_links() {
     local vps_ip=$(get_public_ip)
-    
-    echo -e "\n======================= 系统运行状态 ======================="
+
+    echo -e "
+======================= 运行状态 ======================="
     if systemctl is-active --quiet sing-box; then
         echo -e "sing-box 运行状态: ${GREEN}运行中 (Active)${PLAIN}"
-        
-        # 显示代理出站节点详情
+
+        # 查看当前选中的代理出口节点
         if [[ -f "${SB_DIR}/selected_node.json" ]]; then
             local proto=$(jq -r '.type' "${SB_DIR}/selected_node.json" 2>/dev/null)
             local server=$(jq -r '.server' "${SB_DIR}/selected_node.json" 2>/dev/null)
             local port=$(jq -r '.server_port' "${SB_DIR}/selected_node.json" 2>/dev/null)
             echo -e "代理出站节点:     ${CYAN}${proto}://${server}:${port}${PLAIN}"
-            
-            # 显示通过代理出站探测的真实 IP 及归属
+
+            # 严格使用合法 IP 正则匹配测试代理出站连通性
             local ip_info=$(curl -s4m5 -x http://127.0.0.1:10080 ip-api.com/json/ 2>/dev/null)
             if [[ -n "$ip_info" ]]; then
                 local vpn_ip=$(echo "$ip_info" | jq -r '.query' 2>/dev/null)
@@ -1095,60 +1195,78 @@ view_status_and_links() {
                 if [[ -n "$vpn_ip" && "$vpn_ip" != "null" ]]; then
                     echo -e "代理实际出口 IP:   ${CYAN}${vpn_ip}${PLAIN} (${country} - ${isp})"
                 else
-                    echo -e "代理实际出口 IP:   ${YELLOW}已拉起代理，但无法获取详细归属信息${PLAIN}"
+                    echo -e "代理实际出口 IP:   ${YELLOW}通道正常但未能获取出口归属${PLAIN}"
                 fi
             else
                 echo -e "代理实际出口 IP:   ${RED}代理通道似乎断开，无法连通外网${PLAIN}"
             fi
         else
-            echo -e "出站网络模式:     ${YELLOW}直连模式 (Direct)${PLAIN}"
+            echo -e "代理实际出口 IP:   ${YELLOW}直连模式 (Direct)${PLAIN}"
         fi
     else
-        echo -e "sing-box 运行状态: ${RED}已停止 (Inactive)${PLAIN}"
+        echo -e "sing-box 运行状态: ${RED}未启动 (Inactive)${PLAIN}"
         echo -e "${RED}--- sing-box 最近的错误日志 ---${PLAIN}"
         journalctl -u sing-box --no-pager -n 15
         echo -e "${RED}-------------------------------${PLAIN}"
     fi
-    
-    # 检测自愈重连守护服务状态
-    local keepalive_status="${RED}已关闭 (Inactive)${PLAIN}"
+
+    # 监测断线自愈守护进程状态
+    local keepalive_status="${RED}未启动 (Inactive)${PLAIN}"
     if systemctl is-active --quiet vpngate-keepalive 2>/dev/null; then
         keepalive_status="${GREEN}运行中 (Active)${PLAIN}"
     fi
     echo -e "断线自愈重连守护:  ${keepalive_status}"
-    
-    # 显示当前的策略模式
+
+    # 检测当前出站策略模式
     if [[ "$ROUTING_MODE" -eq 2 ]]; then
-        echo -e "分流出站路由模式:  ${CYAN}规则分流模式 (境外常用走代理，其余直连)${PLAIN}"
+        echo -e "分流出站路由模式:  ${CYAN}全局代理模式 (所有流量强制走境外代理出站)${PLAIN}"
     else
-        echo -e "分流出站路由模式:  ${CYAN}全局代理模式 (除中国流量直连，其余全部走代理)${PLAIN}"
+        echo -e "分流出站路由模式:  ${CYAN}规则分流模式 (除中国流量直连，其余全部走代理)${PLAIN}"
     fi
-    
-    if [[ -z "$UUID" ]]; then
-        warn "尚未生成任何节点入站配置，请先执行选项 2 进行配置生成。"
+
+    if [[ -z "$UUID" || -z "$PASSWORD" ]]; then
+        warn "尚未配置 VPS 代理入站参数，请先执行选项 2 进行配置。"
         return
     fi
-    
-    echo -e "\n======================= 协议入站端口 ======================="
+
+    echo -e "
+======================= 端口与密钥 ======================="
     echo -e "VLESS-Reality 端口: ${CYAN}${PORT_VL_RE}${PLAIN}"
-    echo -e "VMess-WS 端口:      ${CYAN}${PORT_VM_WS}${PLAIN}"
-    echo -e "通用 UUID 密码:     ${CYAN}${UUID}${PLAIN}"
-    
-    echo -e "\n======================= 客户端连接节点 (直连导入) ======================="
-    
-    # VLESS Reality 链接
-    local vless_link="vless://${UUID}@${vps_ip}:${PORT_VL_RE}?security=reality&sni=${YM_VL_RE}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&flow=xtls-rprx-vision#sb-vpngate_VLESS"
-    echo -e "\033[35;1mVLESS-Reality 链接:\033[0m"
+    echo -e "AnyTLS 端口:        ${CYAN}${PORT_ANYTLS}${PLAIN}"
+    echo -e "Hysteria 2 端口:    ${CYAN}${PORT_HY2}${PLAIN}"
+    echo -e "TUIC v5 端口:       ${CYAN}${PORT_TUIC}${PLAIN}"
+    echo -e "入站 UUID 密钥:     ${CYAN}${UUID}${PLAIN}"
+    echo -e "AnyTLS/TUIC 密码:   ${CYAN}${PASSWORD}${PLAIN}"
+
+    echo -e "
+======================= 客户端连接 (分享链接) ======================="
+
+    # VLESS Reality 节点
+    local vless_link="vless://${UUID}@${vps_ip}:${PORT_VL_RE}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${YM_VL_RE}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}#VLESS_Reality"
+    echo -e "[35;1m1. VLESS-Reality 链接:[0m"
     echo "$vless_link"
-    
-    # VMess WS 链接 (Base64)
-    local vmess_json="{\"v\":\"2\",\"ps\":\"sb-vpngate_VMess-WS\",\"add\":\"${vps_ip}\",\"port\":${PORT_VM_WS},\"id\":\"${UUID}\",\"aid\":\"0\",\"scy\":\"auto\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${vps_ip}\",\"path\":\"${PATH_VM_WS}\",\"tls\":\"none\"}"
-    local vmess_b64=$(echo -n "$vmess_json" | base64 -w 0)
-    local vmess_link="vmess://${vmess_b64}"
-    echo -e "\n\033[35;1mVMess-WS 链接:\033[0m"
-    echo "$vmess_link"
-    
-    echo -e "\n============================================================\n"
+
+    # AnyTLS 节点
+    local anytls_link="anytls://${PASSWORD}@${vps_ip}:${PORT_ANYTLS}?security=tls&sni=${YM_VL_RE}&allowInsecure=1#AnyTLS"
+    echo -e "
+[35;1m2. AnyTLS 节点链接:[0m"
+    echo "$anytls_link"
+
+    # Hysteria 2 节点
+    local hy2_link="hysteria2://${PASSWORD}@${vps_ip}:${PORT_HY2}?insecure=1&sni=${YM_VL_RE}&alpn=h3#Hysteria2"
+    echo -e "
+[35;1m3. Hysteria 2 链接:[0m"
+    echo "$hy2_link"
+
+    # TUIC v5 节点
+    local tuic_link="tuic://${UUID}:${PASSWORD}@${vps_ip}:${PORT_TUIC}?congestion_control=bbr&alpn=h3&allow_insecure=1#TUIC5"
+    echo -e "
+[35;1m4. TUIC v5 链接:[0m"
+    echo "$tuic_link"
+
+    echo -e "
+============================================================
+"
 }
 
 # 查看运行日志
