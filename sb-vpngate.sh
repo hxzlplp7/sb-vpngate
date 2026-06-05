@@ -1070,13 +1070,35 @@ for idx in "${sorted_available_indices[@]}"; do
 done
 echo "------------------------------------------------------------------------------------------------------------"
 
-local try_indices=("${sorted_available_indices[@]}")
-local total_try=${#try_indices[@]}
-if [[ "$total_try" -eq 0 ]]; then
-    warn "没有可用节点！"
-    return 1
-fi
-info "已整理候选队列：按延迟排序仅尝试这 ${total_try} 个可用节点（已过滤掉不可用节点）。"
+    local try_indices=()
+    local select_idx=""
+    if [[ "$1" == "auto" ]]; then
+        try_indices=("${sorted_available_indices[@]}")
+    else
+        read -p "👉 请输入要连接的节点序号 (1-${#sorted_available_indices[@]}, 直接回车默认按最优顺序自动连接): " select_idx
+        if [[ -n "$select_idx" ]]; then
+            if [[ "$select_idx" =~ ^[0-9]+$ ]] && [[ "$select_idx" -ge 1 ]] && [[ "$select_idx" -le "${#sorted_available_indices[@]}" ]]; then
+                local actual_array_idx=$((select_idx-1))
+                local target_idx="${sorted_available_indices[$actual_array_idx]}"
+                try_indices=("$target_idx")
+                info "已手动选择节点 #$select_idx (${node_proto[$target_idx]}://${node_server[$target_idx]}:${node_port[$target_idx]})，正在尝试连接..."
+            else
+                warn "无效的序号输入，将默认按最优顺序连接..."
+                try_indices=("${sorted_available_indices[@]}")
+            fi
+        else
+            try_indices=("${sorted_available_indices[@]}")
+        fi
+    fi
+
+    local total_try=${#try_indices[@]}
+    if [[ "$total_try" -eq 0 ]]; then
+        warn "没有可用节点！"
+        return 1
+    fi
+    if [[ "$1" != "auto" && -z "$select_idx" ]]; then
+        info "已整理候选队列：按风险与延迟评分优先仅尝试这 ${total_try} 个可用节点（已过滤掉不可用节点）。"
+    fi
 
 local success=0
     local try_count=0
