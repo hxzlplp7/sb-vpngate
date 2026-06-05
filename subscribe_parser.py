@@ -225,6 +225,28 @@ def parse_v2ray_urls(content):
             nodes.append(node)
     return nodes
 
+def query_ip_risk(ip, timeout=5):
+    url = f"http://ip234.in/fraud_check?ip={ip}"
+    try:
+        req = urllib.request.Request(
+            url, 
+            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            res_data = json.loads(response.read().decode('utf-8'))
+            if res_data and res_data.get('code') == 0:
+                data = res_data.get('data', {})
+                risk_str = data.get("risk", "未知")
+                if risk_str.endswith("风险"):
+                    risk_str = risk_str[:-2]
+                return ip, {
+                    "risk": risk_str,
+                    "risk_score": data.get("score", "-")
+                }
+    except Exception:
+        pass
+    return ip, {"risk": "未知", "risk_score": "-"}
+
 def resolve_ips_country(nodes):
     ip_to_nodes = {}
     ips_to_query = []
@@ -264,7 +286,6 @@ def resolve_ips_country(nodes):
                 for item in batch_res:
                     query_ip = item.get("query")
                     if query_ip:
-                        # 翻译部分常用国家以符合国人阅读习惯
                         raw_c = item.get("country", "Unknown")
                         c_code = item.get("countryCode", "XX")
                         
@@ -276,13 +297,24 @@ def resolve_ips_country(nodes):
         except Exception:
             pass
             
+    # 并发查询 IP 风险值
+    risk_results = {}
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {executor.submit(query_ip_risk, ip): ip for ip in ips_to_query}
+        for future in futures:
+            ip, risk_info = future.result()
+            risk_results[ip] = risk_info
+            
     valid_nodes = []
     for ip, node_list in ip_to_nodes.items():
         res = results.get(ip, {"country": "Unknown", "country_code": "XX", "isp": "Unknown"})
+        risk_res = risk_results.get(ip, {"risk": "未知", "risk_score": "-"})
         for node in node_list:
             node["country"] = res["country"]
             node["country_code"] = res["country_code"]
             node["isp"] = res["isp"]
+            node["risk"] = risk_res["risk"]
+            node["risk_score"] = risk_res["risk_score"]
             valid_nodes.append(node)
             
     return valid_nodes

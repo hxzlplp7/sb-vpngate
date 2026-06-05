@@ -111,7 +111,7 @@ def fetch_url(url, timeout=8):
         )
         with urllib.request.urlopen(req, timeout=timeout) as response:
             return response.read(), url
-    except Exception:
+    except Exception as e:
         return None, url
 
 def parse_vmess(link):
@@ -122,6 +122,7 @@ def parse_vmess(link):
             return None
         data = json.loads(decoded)
         
+        # 兼容部分订阅里端口写成字符串的情况
         port = data.get("port", 443)
         try:
             port = int(port)
@@ -238,6 +239,7 @@ def parse_shadowsocks(link):
         userinfo = parsed.username
         
         if not host or not port:
+            # 兼容 ss://base64_string 结构
             raw_b64 = link[5:].split('#')[0]
             decoded = decode_base64_safely(raw_b64)
             if decoded:
@@ -274,10 +276,12 @@ def parse_single_link(link):
     return None
 
 def parse_mixed_subscription(content):
+    # 尝试 Base64 订阅
     decoded = decode_base64_safely(content)
     if decoded:
         return parse_v2ray_urls(decoded)
         
+    # 如果解码失败，尝试直接作为 v2ray URLs 文本解析
     return parse_v2ray_urls(content)
 
 def parse_v2ray_urls(content):
@@ -288,6 +292,28 @@ def parse_v2ray_urls(content):
         if node:
             nodes.append(node)
     return nodes
+
+def query_ip_risk(ip, timeout=5):
+    url = f"http://ip234.in/fraud_check?ip={ip}"
+    try:
+        req = urllib.request.Request(
+            url, 
+            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            res_data = json.loads(response.read().decode('utf-8'))
+            if res_data and res_data.get('code') == 0:
+                data = res_data.get('data', {})
+                risk_str = data.get("risk", "未知")
+                if risk_str.endswith("风险"):
+                    risk_str = risk_str[:-2]
+                return ip, {
+                    "risk": risk_str,
+                    "risk_score": data.get("score", "-")
+                }
+    except Exception:
+        pass
+    return ip, {"risk": "未知", "risk_score": "-"}
 
 def resolve_ips_country(nodes):
     ip_to_nodes = {}
@@ -330,6 +356,7 @@ def resolve_ips_country(nodes):
                     if query_ip:
                         raw_c = item.get("country", "Unknown")
                         c_code = item.get("countryCode", "XX")
+                        
                         results[query_ip] = {
                             "country": raw_c,
                             "country_code": c_code,
@@ -338,13 +365,24 @@ def resolve_ips_country(nodes):
         except Exception:
             pass
             
+    # 并发查询 IP 风险值
+    risk_results = {}
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {executor.submit(query_ip_risk, ip): ip for ip in ips_to_query}
+        for future in futures:
+            ip, risk_info = future.result()
+            risk_results[ip] = risk_info
+            
     valid_nodes = []
     for ip, node_list in ip_to_nodes.items():
         res = results.get(ip, {"country": "Unknown", "country_code": "XX", "isp": "Unknown"})
+        risk_res = risk_results.get(ip, {"risk": "未知", "risk_score": "-"})
         for node in node_list:
             node["country"] = res["country"]
             node["country_code"] = res["country_code"]
             node["isp"] = res["isp"]
+            node["risk"] = risk_res["risk"]
+            node["risk_score"] = risk_res["risk_score"]
             valid_nodes.append(node)
             
     return valid_nodes
@@ -368,9 +406,11 @@ def main():
             else:
                 print(f"  -> 网络超时或加载失败: {url.split('/')[-1]}", flush=True)
                 
+    # 节点去重 (根据 server, port, type, uuid/password 组合去重)
     unique_nodes = []
     seen_keys = set()
     for n in all_nodes:
+        # 创建唯一指纹
         fp = f"{n.get('type')}_{n.get('server')}_{n.get('server_port')}_{n.get('uuid') or n.get('password')}"
         if fp not in seen_keys:
             seen_keys.add(fp)
@@ -378,8 +418,10 @@ def main():
             
     print(f"[Parser] 获取到去重节点共计: {len(unique_nodes)} 个，开始批量查询地理归属 (IP-API Batch)...", flush=True)
     
+    # 批量解析 IP 归属国
     final_nodes = resolve_ips_country(unique_nodes)
     
+    # 写入缓存文件
     cache_path = "/etc/sing-box/nodes_cache.json"
     with open(cache_path, "w", encoding="utf-8") as f:
         json.dump(final_nodes, f, ensure_ascii=False, indent=2)
@@ -388,6 +430,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 EOF
     chmod +x "${SB_DIR}/subscribe_parser.py"
 }
@@ -965,8 +1008,10 @@ connect_vpngate() {
         node_proto[$j]=$(echo "$item" | jq -r '.type')
         node_country[$j]=$(echo "$item" | jq -r '.country')
         node_isp[$j]=$(echo "$item" | jq -r '.isp')
-        # 将 tag 强制覆盖为 proxy-out，并移除 ip-api 探测产生的冗余属性以符合 sing-box json 约束
-        node_json_str[$j]=$(echo "$item" | jq -c '. + {tag: "proxy-out"} | del(.country, .country_code, .isp, .server_ip, .fetched_at)')
+        node_risk[$j]=$(echo "$item" | jq -r '.risk // "未知"')
+        node_risk_score[$j]=$(echo "$item" | jq -r '.risk_score // "-"')
+        # 将 tag 强制覆盖为 proxy-out，并移除 ip-api/risk 产生的冗余属性以符合 sing-box json 约束
+        node_json_str[$j]=$(echo "$item" | jq -c '. + {tag: "proxy-out"} | del(.country, .country_code, .isp, .server_ip, .fetched_at, .risk, .risk_score)')
     done
     
     # 多线程进行延迟测速
@@ -1008,17 +1053,18 @@ if [[ "${#available_indices[@]}" -gt 0 ]]; then
     ))
 fi
 
-echo -e "\n------------------------------------------------------------------------------------------------"
-printf "%-5s | %-10s | %-12s | %-12s | %-8s | %-20s | %-12s\n" "序号" "协议" "延迟" "国家" "端口" "服务器地址" "网络提供商"
-echo "------------------------------------------------------------------------------------------------"
+echo -e "\n------------------------------------------------------------------------------------------------------------"
+printf "%-5s | %-10s | %-12s | %-12s | %-8s | %-20s | %-15s | %-10s\n" "序号" "协议" "延迟" "国家" "端口" "服务器地址" "网络提供商" "IP风险"
+echo "------------------------------------------------------------------------------------------------------------"
 
 local show_idx=1
 for idx in "${sorted_available_indices[@]}"; do
     local rtt_show="${node_rtt[$idx]} ms"
-    printf "\033[36m%-5s\033[0m | %-10s | %-12b | %-12s | %-8s | %-20s | %-12s\n" "$show_idx" "${node_proto[$idx]}" "$rtt_show" "${node_country[$idx]}" "${node_port[$idx]}" "${node_server[$idx]:0:18}..." "${node_isp[$idx]}"
+    local risk_show="${node_risk[$idx]}(${node_risk_score[$idx]})"
+    printf "\033[36m%-5s\033[0m | %-10s | %-12b | %-12s | %-8s | %-20s | %-15s | %-10s\n" "$show_idx" "${node_proto[$idx]}" "$rtt_show" "${node_country[$idx]}" "${node_port[$idx]}" "${node_server[$idx]:0:18}..." "${node_isp[$idx]:0:15}" "$risk_show"
     show_idx=$((show_idx+1))
 done
-echo "------------------------------------------------------------------------------------------------"
+echo "------------------------------------------------------------------------------------------------------------"
 
 local try_indices=("${sorted_available_indices[@]}")
 local total_try=${#try_indices[@]}
@@ -1394,9 +1440,8 @@ main_menu() {
     fi
     
     echo -e "\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
-    cyan "           sing-box 入站 / 免费节点链式策略分流出站 一键脚本 (纯 Bash 版) "
-    echo " 1. 安装/更新 Sing-box 依赖及主内核 "
-    echo " 2. 配置并生成 Sing-box 入站配置 (VLESS-Reality / VMess-WS) "
+    cyan "           sing-box 入站 / 免费节点链式策略分流出站 一键脚本 "
+    echo " 2. 配置并生成 Sing-box 入站配置"
     echo " 3. 更新并连接免费节点 (从 6 个订阅源自动抓取/测速/过滤) "
     echo " 4. 修改策略出站分流模式 (全局/规则分流) "
     echo " 5. 启动服务 (sing-box) "
