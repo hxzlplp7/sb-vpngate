@@ -1,90 +1,84 @@
 # sb-vpngate
 
-基于 **sing-box 代理入站**与 **VPN Gate / 直连策略路由出站分流** 的一键部署与管理脚本。本脚本专为 Linux VPS 优化，完全采用 **纯 Bash / Shell 脚本实现（无 Python 依赖）**，设计优雅、防断连且高度自包含。
+基于 **sing-box 四合一代理入站** 与 **境外免费出口节点链式策略出站分流** 的一键部署与管理脚本。
+
+本脚本专为 Linux VPS 优化，完全采用 **纯 Bash + 内联 Python 节点解析助手** 实现，设计优雅，零底层网络修改（无需虚拟网卡与系统路由表挂载），绝对防 SSH 断连，且具备掉线秒级自动漂移自愈能力。
 
 ---
 
-## 架构设计与网络拓扑
+## 🏗️ 架构设计与网络拓扑
 
 ```mermaid
 graph TD
-    Client[客户端] -->|VLESS / VMess 代理协议| VPS_In[VPS sing-box 入站]
-    VPS_In -->|解析路由规则| Route{路由规则分流}
-    Route -->|直连流量| Direct[direct 出站] -->|VPS 物理网卡 eth0| Net_Direct[直连目标网站]
-    Route -->|VPNGate 流量| VPNGate_Out[vpngate-out 出站: fwmark 1000]
-    VPNGate_Out -->|策略路由| tun_vg[tun-vpngate 虚拟网卡]
-    tun_vg -->|OpenVPN 客户端| eth0_vpn[VPS 物理网卡 eth0] -->|加密隧道| VG_Server[VPN Gate 志愿节点]
-    VG_Server --> Net_VPN[分流目标网站]
+    Client[客户端] -->|VLESS / AnyTLS / Hy2 / TUIC| VPS_In[VPS sing-box 入站]
+    VPS_In -->|路由规则分流| Route{sing-box 路由}
+    Route -->|直连流量| Direct[direct 出站] -->|VPS 物理网卡| Net_Direct[目标网站]
+    Route -->|代理流量| Proxy_Out[proxy-out 免费节点出站]
+    Proxy_Out -->|VMess/VLESS/SS/Trojan 协议| Remote_Node[外部免费出口节点] --> Net_Proxy[目标网站]
+
+    Monitor[vpngate-keepalive 守护进程] -->|定期探测| Local_In[127.0.0.1:10080 本地HTTP入站]
+    Local_In -->|强制走代理| Proxy_Out
 ```
 
-### 策略路由工作原理
-1. **防止网关劫持 (No SSH Disconnect)**：OpenVPN 启动时带有 `route-nopull`，只在系统内注册 `tun-vpngate` 接口，不覆盖 VPS 本身的默认网关。这确保了 SSH 终端和入站连接永远不会断开。
-2. **策略标记 (Policy Routing)**：sing-box 出站绑定 `routing_mark: 1000`；Linux 内核检测到 `fwmark 1000` (0x3e8) 的数据包，会强制查询策略路由表 `1000`，由 `tun-vpngate` 接口流出。
-3. **源地址伪装 (MASQUERADE)**：挂载 iptables 规则，对流经 `tun-vpngate` 的数据包执行 NAT 转换，保证数据包能正确返回。
+### 链式分流工作原理
+1. **四合一强力入站**：支持 **VLESS-Reality** (借用安全证书) / **AnyTLS** (新型 TLS 混淆) / **Hysteria 2** (强抗封锁 UDP) / **TUIC v5** (高性能 QUIC) 共存入站。
+2. **免网卡零风险 (No SSH Disconnect)**：完全运行在应用层，无需创建 `tun` 网卡，不再修改 Linux 底层系统路由表与 iptables NAT 转发规则，彻底杜绝 VPS 发生 SSH 意外断开的隐患。
+3. **本地监测入站 (`local-in`)**：sing-box 模板中内置一个监听在 `127.0.0.1:10080` 的 HTTP inbound，自愈重连守护进程定期通过该接口进行外网连通检测，判定当前外部节点是否可用。
 
 ---
 
-## 功能特性
+## 💎 核心功能特性
 
-* **纯 Bash 实现**：移除所有 Python 依赖，仅使用 `curl`, `awk`, `sort`, `base64` 等标准 Linux 命令行工具，极高运行效率与兼容性。
-* **高自包含单文件**：主脚本 [sb-vpngate.sh](file:///d:/workspace/sb-vpngate/sb-vpngate.sh) 内嵌了所有的路由挂载脚本和 sing-box 配置模板。运行安装依赖时会自动释放和挂载相应资源，下载单文件即可部署整套系统。
-* **双重协议入站**：支持主流的高抗封锁 **VLESS-Reality (XTLS-Vision)** 和支持 CDN 优选的 **VMess-WS**。
-* **实时节点筛选与测速**：自动抓取 VPN Gate 节点，以系统评分降序或延迟进行排序，显示格式化终端表格供用户交互式挑选。
-* **多种出站路由模式**：
-  * **全局代理模式**：除中国大陆流量直连外，其余所有上网流量全部走 VPN Gate 出站（适合隐藏 VPS IP 或流媒体解锁）。
-  * **规则分流模式**：默认 VPS 直连，仅境外主流被墙服务或指定流媒体（Google, Netflix, Disney+, Telegram）走 VPN Gate。
+* **四合一共存入站**：废弃了 VMess 节点，提供了最新的以安全和高性能为主导的 `VLESS-Reality`、`AnyTLS`、`Hysteria 2` 和 `TUIC v5` 四合一共存，并在选项 2 配置成功后**一键格式化输出所有协议的标准订阅分享链接**。
+* **自签证书自动管理**：针对需要 TLS 的 AnyTLS, Hysteria 2, TUIC，脚本会自动使用 `openssl` 在本地生成 10 年期的自签证书，一键拉起服务。
+* **结构化类型安全注入**：节点写入完全抛弃了不安全的 `sed` 文本宏替换，改用 `jq` 工具直接将选定的节点进行类型安全的、非转义式的强 JSON 合并，彻底规避了密码中包含特殊字符时导致的配置文件语法破损问题。
+* **并发测速与升序排版**：从 6 个高可用非 Clash 订阅源中拉取去重后的数百个节点。通过 Python 端的 `ip-api/batch` 接口批量查询去重 IP 的地理归属；在 Bash 测速端**自动过滤删除所有不可用节点**，且仅将可用节点按照 **TCP 延迟从小到大（升序）** 重新进行排版展示与轮询连接。
+* **掉线自动重连与漂移自愈**：启用断线守护后，守护服务会每 60 秒发起一次**基于 IPv4 正则匹配的真连通强校验**（防止代理返回 502/504 报错产生虚假连通）。一旦断网，会在秒级自动从延迟库里切换并连接到下一个最快的可用节点。
+* **跨平台协作换行锁定**：项目配置了 `.gitattributes`，强行锁定脚本为 Unix 的 LF 换行格式，保证在任何平台协作克隆时都不会发生 `env: 'bash\r': No such file or directory` 错误。
 
 ---
 
-## 部署与安装步骤
+## 📥 部署与安装步骤
 
-### 方式 1：使用一键快捷命令在线运行 (推荐)
+### 方式 1：使用一键快捷命令在线运行 (推荐，挂载时间戳防缓存)
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/hxzlplp7/sb-vpngate/main/sb-vpngate.sh)
+bash <(curl -Ls "https://raw.githubusercontent.com/hxzlplp7/sb-vpngate/main/sb-vpngate.sh?v=$(date +%s)")
 ```
 
-### 方式 2：手动下载并运行
-请将 [sb-vpngate.sh](file:///d:/workspace/sb-vpngate/sb-vpngate.sh) 上传到您的 **Linux VPS** 上（支持 Debian 11/12、Ubuntu 20.04/22.04、CentOS 7/8/9 等）。
-
+### 方式 2：手动下载或 Git 克隆运行
 ```bash
-# 1. 赋予执行权限
+git clone https://github.com/hxzlplp7/sb-vpngate.git
+cd sb-vpngate
 chmod +x sb-vpngate.sh
-
-# 2. 运行一键管理脚本
 ./sb-vpngate.sh
 ```
 
-### 交互菜单操作指南
+---
 
-运行脚本后，系统会展示如下控制台菜单：
-1. **执行 选项 1**：安装所需系统依赖（`openvpn`, `jq`, `iptables` 等）并拉取安装最新版官方 `sing-box` 二进制内核。
-2. **执行 选项 2**：配置 VLESS-Reality 和 VMess-WS 的端口及参数。程序会自动检查端口占用，生成 UUID、Reality 密钥对与配置，并通过 `jq` 进行 JSON 语法校验。
-3. **执行 选项 3**：交互式更新并连接 VPN Gate。您可以输入国家简称（如 `JP` 过滤日本节点，或者回车查看全部），选择满意的节点序号后，脚本会自动拉起 OpenVPN 拨号建立隧道。
-4. **执行 选项 5**：启动所有服务（sing-box 和 openvpn-vpngate 客户端）。
-5. **执行 选项 7**：查看服务运行状态，并直接获取生成的 **VLESS/VMess 客户端订阅连接**。
-6. **执行 选项 8**：查看运行日志。支持静态查看 sing-box 或 openvpn 的最近 50 行日志，也支持进行实时滚动追踪 (`tail -f`)。
+## ⚙️ 交互菜单操作指南
+
+1. **选项 1：安装/更新 Sing-box 依赖及主内核**  
+   安装系统所需的 `curl`, `python3`, `jq`, `openssl` 等基本依赖，拉取最新官方 sing-box 内核，并自动向系统注册 Systemd 进程。
+2. **选项 2：配置并生成 Sing-box 入站配置 (VLESS-Reality / AnyTLS / Hysteria 2 / TUIC v5)**  
+   输入您的代理域名和各个入站端口（或直接回车使用随机端口），脚本将生成证书并在终端上为您打印出所有 4 个协议的标准客户端分享链接，供您直接导入客户端软件（Nekobox, Shadowrocket, V2rayN 等）。
+3. **选项 3：更新并连接免费节点 (从 6 个订阅源自动抓取/测速/过滤)**  
+   输入国家简称（如 `JP` 过滤日本节点，或者直接回车展示所有国家节点）。脚本自动拉取订阅，对前 25 个节点进行高并发 TCP 延迟测速，**自动过滤并隐藏不可用节点，且按照延迟从小到大升序排序展示**。选择序号后自动重试轮询，直至基于 IP 强校验成功连通为止。
+4. **选项 7：查看当前运行状态与配置连接信息**  
+   查看 sing-box 进程和自愈守护服务运行状态。通过本地代理接口回显您当前真实的代理出口 IP 物理归属，并重新为您展示所有 4 个入站协议的详细端口、密钥及节点分享链接。
+5. **选项 10：开启/关闭 节点掉线自动重连守护服务**  
+   开启后，系统在后台每 60 秒轮询检测。一旦发现代理通道断开，便会自动拉起自愈漂移重连服务，零人工干预保证 7x24 小时翻墙不断线。
 
 ---
 
-## 连通性与分流验证
-
-1. **验证策略路由正常 (未劫持默认路由)**：
-   在 VPS 终端执行 `curl icanhazip.com`，返回的 IP 应该仍然是 **VPS 自身的公网 IP**，且 SSH 终端无任何卡顿。
-2. **验证直连出站**：
-   配置好客户端代理后，访问 `http://ip.sb`。由于未被分流规则命中，返回的应为 **VPS 公网 IP**。
-3. **验证 VPN Gate 分流出站**：
-   代理下访问 `https://www.google.com` 或 `https://www.netflix.com`。由于命中分流出站，在浏览器中查看访问 IP，应显示为 **VPN Gate 志愿节点的公网 IP**（例如日本或美国的 IP）。
-
----
-
-## 文件结构说明
+## 📂 文件结构说明
 
 当主脚本运行安装后，会在您的系统里分发和配置以下文件路径：
-* `/etc/sing-box/sb-vpngate.env` — 保存入站端口、UUID、私钥等环境变量，用于脚本二次启动时自动恢复配置。
+* `/etc/sing-box/sb-vpngate.env` — 保存入站端口、UUID、密码、自愈国家条件等环境变量，用于脚本二次启动或重启时自动恢复配置。
 * `/etc/sing-box/config.json` — 经校验通过的 sing-box 运行配置文件。
-* `/etc/sing-box/sb-config.json.template` — sing-box 基础配置模板。
-* `/etc/openvpn/vpngate.ovpn` — 当前正在使用的 VPN Gate 节点 OpenVPN 配置文件。
-* `/etc/openvpn/vpngate-up.sh` — OpenVPN 隧道启动时自动调用的策略路由挂载脚本。
-* `/etc/openvpn/vpngate-down.sh` — OpenVPN 隧道断开时自动调用的策略清理脚本。
-* `/etc/systemd/system/sing-box.service` — sing-box systemd 守护进程。
-* `/etc/systemd/system/openvpn-vpngate.service` — VPN Gate 客户端连接 systemd 守护进程。
+* `/etc/sing-box/sb-config.json.template` — sing-box 四合一配置模板。
+* `/etc/sing-box/subscribe_parser.py` — Python 3 并发拉取和节点解析工具。
+* `/etc/sing-box/nodes_cache.json` — 节点缓存文件。
+* `/etc/sing-box/self_signed.crt` / `self_signed.key` — 自动生成的 10 年期自签证书。
+* `/usr/local/bin/vpngate-keepalive.sh` — 自动掉线监控自愈脚本。
+* `/etc/systemd/system/sing-box.service` — sing-box systemd 守护服务。
+* `/etc/systemd/system/vpngate-keepalive.service` — 断线重连守护 systemd 监控服务。
