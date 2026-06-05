@@ -430,24 +430,6 @@ write_config_template() {
       }
     },
     {
-      "type": "vmess",
-      "tag": "vmess-in",
-      "listen": "::",
-      "listen_port": PORT_VM_WS,
-      "users": [
-        {
-          "uuid": "UUID_VAL",
-          "alterId": 0
-        }
-      ],
-      "transport": {
-        "type": "ws",
-        "path": "PATH_VM_WS_VAL",
-        "max_early_data": 2048,
-        "early_data_header_name": "Sec-WebSocket-Protocol"
-      }
-    },
-    {
       "type": "anytls",
       "tag": "anytls-in",
       "listen": "::",
@@ -741,34 +723,32 @@ configure_inbounds() {
         short_id_val=$(openssl rand -hex 8)
     fi
     
-    if [[ -n "$PATH_VM_WS" ]]; then
-        path_vm_ws_val="$PATH_VM_WS"
-    else
-        path_vm_ws_val="/${uuid_val}-vm"
-    fi
-    
     # 保存环境参数到持久化文件
     cat <<EOF | tr -d '\r' > "$ENV_FILE"
 PORT_VL_RE=${port_vl_re}
-PORT_VM_WS=${port_vm_ws}
+PORT_ANYTLS=${port_anytls}
+PORT_HY2=${port_hy2}
+PORT_TUIC=${port_tuic}
 UUID="${uuid_val}"
+PASSWORD="${password_val}"
 YM_VL_RE="${ym_vl_re}"
 PRIVATE_KEY="${priv_key}"
 PUBLIC_KEY="${pub_key}"
 SHORT_ID="${short_id_val}"
-PATH_VM_WS="${path_vm_ws_val}"
 ROUTING_MODE=${ROUTING_MODE:-1}
 SAVED_COUNTRY_FILTER="${SAVED_COUNTRY_FILTER}"
 EOF
 
     PORT_VL_RE=${port_vl_re}
-    PORT_VM_WS=${port_vm_ws}
+    PORT_ANYTLS=${port_anytls}
+    PORT_HY2=${port_hy2}
+    PORT_TUIC=${port_tuic}
     UUID="${uuid_val}"
+    PASSWORD="${password_val}"
     YM_VL_RE="${ym_vl_re}"
     PRIVATE_KEY="${priv_key}"
     PUBLIC_KEY="${pub_key}"
     SHORT_ID="${short_id_val}"
-    PATH_VM_WS="${path_vm_ws_val}"
     
     info "入站配置参数已成功生成并保存。"
 }
@@ -809,8 +789,7 @@ if [[ -z "${PORT_VL_RE}" || -z "${PORT_ANYTLS}" || -z "${PORT_HY2}" || -z "${POR
     
     if [[ -n "$SHORT_ID" ]]; then short_id_val="$SHORT_ID"; else short_id_val=$(openssl rand -hex 8); fi
 
-    cat <<EOF | tr -d '
-' > "$ENV_FILE"
+    cat <<EOF | tr -d '\r' > "$ENV_FILE"
 PORT_VL_RE=${port_vl_re}
 PORT_ANYTLS=${port_anytls}
 PORT_HY2=${port_hy2}
