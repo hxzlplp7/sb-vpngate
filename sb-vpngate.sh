@@ -1048,8 +1048,12 @@ local sorted_available_indices=()
 if [[ "${#available_indices[@]}" -gt 0 ]]; then
     sorted_available_indices=($(
         for idx in "${available_indices[@]}"; do
-            echo "$idx ${node_rtt[$idx]}"
-        done | sort -k2,2n | awk '{print $1}'
+            local score="${node_risk_score[$idx]}"
+            if [[ ! "$score" =~ ^[0-9]+$ ]]; then
+                score=50
+            fi
+            echo "$idx $score ${node_rtt[$idx]}"
+        done | sort -k2,2n -k3,3n | awk '{print $1}'
     ))
 fi
 
